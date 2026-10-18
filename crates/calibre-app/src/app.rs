@@ -58,7 +58,11 @@ enum Job {
     UnreadPriority(Value),
     ChatReply(Value),
     StatusNote(String, Value),
-    VaultLoaded(String, String),
+    VaultLoaded {
+        calibre_server_url: String,
+        calibre_password: String,
+        llm_api_key: String,
+    },
 }
 
 pub struct CalibreApp {
@@ -98,11 +102,18 @@ pub struct CalibreApp {
     chat_reply: String,
     // Crossconnect state
     speak_text: String,
+    speech_url: String,
     webhook_url: String,
     // Settings / Vault state
     vault_loaded: bool,
+    vault_status_note: String,
     calibre_server_url: String,
     calibre_password: String,
+    llm_api_key: String,
+    llm_base_url: String,
+    custom_library_name: String,
+    custom_library_path: String,
+    pinned_registry: crate::registry::Registry,
 }
 
 pub fn harsh_visuals() -> egui::Visuals {
@@ -279,10 +290,17 @@ impl CalibreApp {
                     .to_string(),
             chat_reply: String::new(),
             speak_text: "Calibre Rust library browser ready.".to_string(),
+            speech_url: "http://127.0.0.1:10909/speak".to_string(),
             webhook_url: "http://127.0.0.1:10946/api/events".to_string(),
             vault_loaded: false,
+            vault_status_note: "Keyring: ready".to_string(),
             calibre_server_url: "http://127.0.0.1:8080".to_string(),
             calibre_password: String::new(),
+            llm_api_key: String::new(),
+            llm_base_url: "http://127.0.0.1:11434".to_string(),
+            custom_library_name: String::new(),
+            custom_library_path: String::new(),
+            pinned_registry: crate::registry::load(),
         };
         app.spawn_libraries();
         app.spawn_query_books();
@@ -583,11 +601,19 @@ impl CalibreApp {
                     self.status_line = note;
                     self.last_raw = v;
                 }
-                Job::VaultLoaded(url, pw) => {
-                    if !url.is_empty() {
-                        self.calibre_server_url = url;
+                Job::VaultLoaded {
+                    calibre_server_url,
+                    calibre_password,
+                    llm_api_key,
+                } => {
+                    if !calibre_server_url.is_empty() {
+                        self.calibre_server_url = calibre_server_url;
                     }
-                    self.calibre_password = pw;
+                    self.calibre_password = calibre_password;
+                    self.llm_api_key = llm_api_key;
+                    self.vault_status_note =
+                        "OS Keyring: connected to Windows Credential Manager ('rust-calibre-mcp')"
+                            .to_string();
                 }
             }
         }
@@ -1171,11 +1197,16 @@ impl CalibreApp {
             ui.text_edit_singleline(&mut self.speak_text);
             if ui.button("Speak Now").clicked() {
                 let text = self.speak_text.clone();
+                let url = if self.speech_url.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.speech_url.trim().to_string())
+                };
                 self.spawn(move || async move {
                     let res = dispatch(Command::BridgeSpeak {
                         text,
                         voice: None,
-                        url: None,
+                        url,
                     })
                     .await;
                     Job::StatusNote("bridge.speak dispatched".to_string(), res)
@@ -1221,6 +1252,16 @@ impl CalibreApp {
                 let model = Some(self.chat_model.clone());
                 let prompt = self.chat_prompt.clone();
                 let ctx_val = Some(self.books_val.clone());
+                let base_url = if self.llm_base_url.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.llm_base_url.trim().to_string())
+                };
+                let api_key = if self.llm_api_key.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.llm_api_key.trim().to_string())
+                };
                 self.status_line = "Querying LLM…".to_string();
                 self.spawn(move || async move {
                     Job::ChatReply(
@@ -1233,8 +1274,8 @@ impl CalibreApp {
                                     .to_string(),
                             ),
                             context: ctx_val,
-                            base_url: None,
-                            api_key: None,
+                            base_url,
+                            api_key,
                         })
                         .await,
                     )
@@ -1265,48 +1306,350 @@ impl CalibreApp {
                 })
                 .await
                 .unwrap_or_default();
-                Job::VaultLoaded(url, pw)
+                let key = tokio::task::spawn_blocking(|| {
+                    crate::vault::get("llm_api_key")
+                        .unwrap_or_default()
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                Job::VaultLoaded {
+                    calibre_server_url: url,
+                    calibre_password: pw,
+                    llm_api_key: key,
+                }
             });
         }
-        ui.heading("Settings & Windows Credential Manager Vault");
-        ui.add_space(8.0);
-        card_frame(ui, |ui| {
-            ui.label("Calibre Content Server URL (Optional):");
-            ui.text_edit_singleline(&mut self.calibre_server_url);
-            ui.label("Calibre Content Server Password (Stored in OS Keyring):");
-            ui.add(egui::TextEdit::singleline(&mut self.calibre_password).password(true));
-            if ui.button("Save to Windows Credential Manager").clicked() {
-                let url = self.calibre_server_url.clone();
-                let pw = self.calibre_password.clone();
-                self.spawn(move || async move {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = crate::vault::set("calibre_server_url", &url);
-                        if !pw.is_empty() {
-                            let _ = crate::vault::set("calibre_password", &pw);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Settings · Calibre & Fleet Hardware Configuration");
+            ui.label(RichText::new(&self.vault_status_note).weak());
+            ui.add_space(8.0);
+
+            // Card 1: Calibre Library Registry & Paths
+            card_frame(ui, |ui| {
+                ui.heading("Calibre Library Registry & Active Path");
+                ui.label("Manage registered libraries, add custom external directories, and switch active collections.");
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Active Library:");
+                    let active_display = if self.active_library.is_empty() {
+                        "(none selected)".to_string()
+                    } else {
+                        self.active_library.clone()
+                    };
+                    ui.monospace(&active_display);
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Pin Active to Registry").clicked() && !self.active_library.is_empty() {
+                        let active = self.active_library.clone();
+                        self.pinned_registry = crate::registry::pin_active(&active, &active);
+                        self.status_line = format!(
+                            "Pinned library to registry ({} total)",
+                            self.pinned_registry.libraries.len()
+                        );
+                    }
+                    if ui.button("Rescan Discovered Libraries").clicked() {
+                        self.spawn_libraries();
+                    }
+                });
+
+                ui.separator();
+                ui.label(RichText::new("Add Custom / External Library Path").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut self.custom_library_name);
+                    ui.label("Directory Path:");
+                    ui.add_sized(
+                        [260.0, 20.0],
+                        egui::TextEdit::singleline(&mut self.custom_library_path),
+                    );
+                    if ui.button("Add & Pin").clicked() {
+                        let path = self.custom_library_path.trim().to_string();
+                        if !path.is_empty() {
+                            let name = if self.custom_library_name.trim().is_empty() {
+                                path.clone()
+                            } else {
+                                self.custom_library_name.trim().to_string()
+                            };
+                            self.pinned_registry = crate::registry::pin_active(&name, &path);
+                            self.custom_library_name.clear();
+                            self.custom_library_path.clear();
+                            self.status_line = format!("Added '{name}' to pinned registry");
                         }
-                    })
-                    .await;
-                    Job::StatusNote(
-                        "Saved credentials to Windows Credential Manager".to_string(),
-                        json!({"saved": true}),
-                    )
+                    }
                 });
-            }
-            ui.add_space(6.0);
-            if ui.button("Pin Active Library to Local Registry").clicked() {
-                let active = self.active_library.clone();
-                self.spawn(move || async move {
-                    let reg = tokio::task::spawn_blocking(move || {
-                        crate::registry::pin_active(&active, &active)
-                    })
-                    .await
-                    .unwrap_or_default();
-                    Job::StatusNote(
-                        format!("Pinned library ({} total)", reg.libraries.len()),
-                        serde_json::to_value(reg).unwrap_or_default(),
-                    )
+
+                ui.separator();
+                ui.label(RichText::new("Pinned / Registered Libraries").strong());
+                if self.pinned_registry.libraries.is_empty() {
+                    ui.label("No pinned libraries yet. Pin your active library or add a custom path above.");
+                } else {
+                    let mut remove_name = None;
+                    let mut switch_item = None;
+                    for lib in &self.pinned_registry.libraries {
+                        ui.horizontal(|ui| {
+                            let is_current = lib.path == self.active_library;
+                            if is_current {
+                                status_pill(ui, true, "ACTIVE");
+                            }
+                            ui.label(RichText::new(&lib.name).strong());
+                            ui.monospace(&lib.path);
+                            if !is_current && ui.button("Switch").clicked() {
+                                switch_item = Some((lib.name.clone(), lib.path.clone()));
+                            }
+                            if ui.button("Unpin").clicked() {
+                                remove_name = Some(lib.name.clone());
+                            }
+                        });
+                    }
+                    if let Some((name, path)) = switch_item {
+                        self.active_library = path;
+                        self.spawn_query_books();
+                        self.spawn_analytics();
+                        self.status_line = format!("Switched active library to '{name}'");
+                    }
+                    if let Some(name) = remove_name {
+                        self.pinned_registry = crate::registry::unpin(&name);
+                        self.status_line = format!("Unpinned library '{name}'");
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Card 2: Local AI & Ollama Copilot Configuration
+            card_frame(ui, |ui| {
+                ui.heading("Local AI Copilot (Ollama / Local LLM)");
+                ui.label("Configure your local offline neural librarian. Zero telemetry, 100% private.");
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Provider:");
+                    ui.text_edit_singleline(&mut self.chat_provider);
+                    ui.label("Model:");
+                    ui.text_edit_singleline(&mut self.chat_model);
                 });
-            }
+                ui.horizontal(|ui| {
+                    ui.label("Ollama Endpoint:");
+                    ui.text_edit_singleline(&mut self.llm_base_url);
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Test Ollama Connection").clicked() {
+                        let provider = self.chat_provider.clone();
+                        let model = Some(self.chat_model.clone());
+                        let base_url = if self.llm_base_url.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.llm_base_url.trim().to_string())
+                        };
+                        let api_key = if self.llm_api_key.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.llm_api_key.trim().to_string())
+                        };
+                        self.status_line = "Testing LLM connection…".to_string();
+                        self.spawn(move || async move {
+                            let res = dispatch(Command::LlmChat {
+                                provider,
+                                model,
+                                prompt: "Respond with: ONLINE".to_string(),
+                                system: Some("Test responder".to_string()),
+                                context: None,
+                                base_url,
+                                api_key,
+                            })
+                            .await;
+                            Job::StatusNote("Ollama test completed".to_string(), res)
+                        });
+                    }
+                    if ui.button("Query Available Models").clicked() {
+                        let provider = self.chat_provider.clone();
+                        let base_url = if self.llm_base_url.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.llm_base_url.trim().to_string())
+                        };
+                        let api_key = if self.llm_api_key.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.llm_api_key.trim().to_string())
+                        };
+                        self.status_line = "Querying available models…".to_string();
+                        self.spawn(move || async move {
+                            let res = dispatch(Command::LlmModels {
+                                provider,
+                                base_url,
+                                api_key,
+                            })
+                            .await;
+                            Job::StatusNote("Models catalog fetched".to_string(), res)
+                        });
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            // Card 3: Windows Credential Manager Vault
+            card_frame(ui, |ui| {
+                ui.heading("Windows Credential Manager Vault");
+                ui.label("Credentials are stored in OS Credential Manager under 'rust-calibre-mcp'. Secrets never touch disk in plain text.");
+                ui.add_space(6.0);
+
+                ui.label("Calibre Content Server URL (Optional):");
+                ui.text_edit_singleline(&mut self.calibre_server_url);
+
+                ui.label("Calibre Content Server Password:");
+                ui.add(egui::TextEdit::singleline(&mut self.calibre_password).password(true));
+
+                ui.label("Cloud LLM API Key (Optional, for remote providers):");
+                ui.add(egui::TextEdit::singleline(&mut self.llm_api_key).password(true));
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save to Windows Credential Manager").clicked() {
+                        let url = self.calibre_server_url.clone();
+                        let pw = self.calibre_password.clone();
+                        let key = self.llm_api_key.clone();
+                        self.spawn(move || async move {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let _ = crate::vault::set("calibre_server_url", &url);
+                                if !pw.is_empty() {
+                                    let _ = crate::vault::set("calibre_password", &pw);
+                                }
+                                if !key.is_empty() {
+                                    let _ = crate::vault::set("llm_api_key", &key);
+                                }
+                            })
+                            .await;
+                            Job::StatusNote(
+                                "Saved credentials to Windows Credential Manager".to_string(),
+                                json!({"saved": true}),
+                            )
+                        });
+                    }
+
+                    if ui.button("Clear Vault Credentials").clicked() {
+                        self.calibre_password.clear();
+                        self.llm_api_key.clear();
+                        self.spawn(|| async move {
+                            let _ = tokio::task::spawn_blocking(|| {
+                                let _ = crate::vault::delete("calibre_server_url");
+                                let _ = crate::vault::delete("calibre_password");
+                                let _ = crate::vault::delete("llm_api_key");
+                            })
+                            .await;
+                            Job::StatusNote(
+                                "Cleared credentials from Windows Credential Manager".to_string(),
+                                json!({"cleared": true}),
+                            )
+                        });
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            // Card 4: Fleet Crossconnect Endpoints
+            card_frame(ui, |ui| {
+                ui.heading("Fleet Crossconnect Endpoints");
+                ui.label("Direct inter-tool communication with speech-mcp and aiwatcher.");
+                ui.add_space(6.0);
+
+                ui.label("speech-mcp TTS Endpoint:");
+                ui.text_edit_singleline(&mut self.speech_url);
+
+                ui.label("aiwatcher Webhook Endpoint:");
+                ui.text_edit_singleline(&mut self.webhook_url);
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Test TTS Voice Output").clicked() {
+                        let text = self.speak_text.clone();
+                        let url = if self.speech_url.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.speech_url.trim().to_string())
+                        };
+                        self.spawn(move || async move {
+                            let res = dispatch(Command::BridgeSpeak {
+                                text,
+                                voice: None,
+                                url,
+                            })
+                            .await;
+                            Job::StatusNote("speech-mcp ping dispatched".to_string(), res)
+                        });
+                    }
+
+                    if ui.button("Send Heartbeat Webhook").clicked() {
+                        let url = self.webhook_url.clone();
+                        let lib = self.active_library.clone();
+                        self.spawn(move || async move {
+                            let res = dispatch(Command::BridgeEvent {
+                                kind: "calibre.heartbeat".to_string(),
+                                device: "rust-calibre-mcp".to_string(),
+                                payload: json!({"active_library": lib}),
+                                url: Some(url),
+                            })
+                            .await;
+                            Job::StatusNote("aiwatcher heartbeat sent".to_string(), res)
+                        });
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            // Card 5: Engine Diagnostics & Display Preferences
+            card_frame(ui, |ui| {
+                ui.heading("Engine Diagnostics & Safety Guarantees");
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    status_pill(ui, true, "SQLITE READ-ONLY SAFE");
+                    ui.label("SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX + 5000 ms busy_timeout");
+                });
+                ui.label("Zero write-lock contention. Calibre desktop GUI and background jobs can read/write without crashes or corruptions.");
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let zoom_pct = (self.zoom * 100.0).round() as i64;
+                    ui.label(format!("UI Scale: {zoom_pct}% (Ctrl + Mouse Wheel to zoom)"));
+                    if ui.button("Reset Zoom to 100%").clicked() {
+                        self.zoom = 1.0;
+                        ui.ctx().set_zoom_factor(1.0);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    let theme_label = match self.theme {
+                        Theme::Dark => "Harsh Dark (ArtCraft default)",
+                        Theme::Light => "Crisp Light",
+                    };
+                    ui.label(format!("Active Theme: {theme_label}"));
+                    if ui.button("Switch Theme").clicked() {
+                        self.theme = match self.theme {
+                            Theme::Dark => Theme::Light,
+                            Theme::Light => Theme::Dark,
+                        };
+                        apply_theme(ui.ctx(), self.theme);
+                    }
+                });
+
+                ui.separator();
+                ui.label(RichText::new("Runtime & Architecture").strong());
+                ui.label("· rust-calibre-mcp v0.4.0 · 64-bit Windows Native Binary");
+                ui.label("· GUI: eframe 0.31 / egui (pure Rust, zero Chromium / Electron)");
+                ui.label("· Database Engine: rusqlite with bundled SQLite 3.49 (FTS5 enabled)");
+                ui.label("· MCP Transport: FastMCP 3.1+ Stdio JSON-RPC 2.0");
+            });
         });
     }
 

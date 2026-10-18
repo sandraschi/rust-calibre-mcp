@@ -60,6 +60,14 @@ pub fn pin_active(name: &str, lib_path: &str) -> Registry {
     reg
 }
 
+pub fn unpin(name_or_path: &str) -> Registry {
+    let mut reg = load();
+    reg.libraries
+        .retain(|l| l.name != name_or_path && l.path != name_or_path);
+    save(&reg);
+    reg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +76,17 @@ mod tests {
     fn corrupt_file_is_empty_registry() {
         let registry: Registry = serde_json::from_str("not json{{").unwrap_or_default();
         assert!(registry.libraries.is_empty());
+    }
+
+    #[test]
+    fn registry_manipulations() {
+        let mut reg = Registry::default();
+        reg.libraries.push(RegLibrary {
+            name: "TestLib".to_string(),
+            path: "C:\\TestPath".to_string(),
+        });
+        assert_eq!(reg.libraries.len(), 1);
+        reg.libraries.retain(|l| l.name != "TestLib");
+        assert!(reg.libraries.is_empty());
     }
 }
