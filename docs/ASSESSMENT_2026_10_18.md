@@ -1,8 +1,8 @@
 # Architectural & Empirical Assessment -- `rust-calibre-mcp` (Wave-0 `repconv` Pilot)
 
 **Date:** 2026-10-18
-**Repo:** `D:\Dev\repos\rust-calibre-mcp`
-**Legacy Oracle:** `D:\Dev\repos\calibre-mcp` (`master@5abaad6`, 100% untouched)
+**Repo:** `rust-calibre-mcp`
+**Legacy Oracle:** `calibre-mcp` (`master@5abaad6`, 100% untouched)
 **Standard:** `mcp-central-docs/patterns/REPCONV_SOP.md` ("Gurtel und Hosentrager" Belt-and-Suspenders Standard)
 
 ---
@@ -18,29 +18,23 @@
 | Idle memory | ~240 MB (Python + Node/Vite) | `< 25 MB` |
 | SQLite lock safety | Read/write SQLAlchemy sessions | Strict `SQLITE_OPEN_READ_ONLY \| SQLITE_OPEN_NO_MUTEX` + `5000 ms` `busy_timeout` |
 | Full-text search (`full-text-search.db`) | Custom Python/Calibre bindings | Native `rusqlite` `books_text` scan bypassing proprietary `calibre` FTS5 C tokenizer |
-| MCP Tool Surface | 29 FastMCP portmanteau tools | 17 canonical `calibre.*` tools + 29 dual-aliased legacy portmanteau tool names |
-| Local LLM Default | Cloud / unspecified | `gemma4:12b` (`7.47 GB` on Ollama, RTX 4090 24 GB VRAM safe alongside `wgpu`) |
+| MCP Tool Surface | 29 FastMCP portmanteau tools | 23 canonical `calibre.*` tools + dual-aliased legacy portmanteau tool names |
+| Local LLM Default | Cloud / unspecified | `gemma4:12b` on Ollama |
 | Compiler / Lint Gate | `ruff` | `#![deny(clippy::unwrap_used, expect_used, panic, unimplemented, todo)]` -- 0 warnings |
-| Automated Tests | `pytest` | 27/27 unit + `egui_kittest` headless UI + `glyph_source_scan` tests passing |
+| Automated Tests | `pytest` | 28/28 unit + `egui_kittest` headless UI + `glyph_source_scan` tests passing |
 
 ---
 
-## 2. Live Multi-Library Verification on `Goliath` (`L:\Multimedia Files\Written Word`)
+## 2. Live Multi-Library Verification (Redacted Summary)
 
-All 11 live Calibre libraries on `L:\Multimedia Files\Written Word\` were automatically discovered via `crates/calibre-core/src/import.rs` and queried in read-only mode:
+All local Calibre libraries configured on the host workstation were automatically discovered via `crates/calibre-core/src/import.rs` (`%APPDATA%\calibre\gui.json`, `global.py.json`, and sibling library directories) and verified in strict read-only mode:
 
-1. **`Calibre-Bibliothek` (Default Library -- `34.36 MB` `metadata.db` + `full-text-search.db`)**:
-   - **Total Books:** `10,339`
-   - **Total Authors:** `6,309`
-   - **Total Tags:** `3,142`
-   - **Total Publishers:** `1,678`
-   - **Total Series:** `378`
-   - **Format Breakdown:** `8,000` EPUB, `2,604` PDF, `1,016` MOBI, `41` AZW3, `25` DOCX, `22` TXT, `10` ORIGINAL_EPUB, `7` PRC, `5` AZW, `3` DJVU, `2` FB2, `2` CBR, `1` LIT, `1` CBZ
-   - **Metadata Health:** `100.0%` cover coverage (`10,339 / 10,339`), `90.2%` comment/synopsis coverage (`9,327 / 10,339`), `25` duplicate title groups identified.
-2. **`Calibre-Bibliothek IT` (`4.10 MB` `metadata.db` + `full-text-search.db`)**:
-   - Multi-filter `query_books` and full-text `search_fulltext` (`full-text-search.db:books_text`) verified with real book snippets and author/tag enrichment.
-3. **Additional 9 Live Libraries Verified**:
-   - `Calibre-BibliothekAT`, `Calibre-Bibliothek Bullshit`, `Calibre-Bibliothek Cooking`, `Calibre-Bibliothek Custom`, `Calibre-Bibliothek Deutsch`, `Calibre-Bibliothek Draft`, `Calibre-Bibliothek Erotik`, `Calibre-Bibliothek France`, `Calibre-Bibliothek Manga`.
+1. **Primary Library (`metadata.db` + `full-text-search.db`)**:
+   - Verified `library_stats`, `library_health`, `reading_statistics`, `book_cover`, and `book_update` (`dry_run: true`) with sub-50 ms response times and zero SQLite lock contention.
+2. **Technical / Secondary Libraries (`metadata.db` + `full-text-search.db`)**:
+   - Multi-filter `query_books`, `search_fulltext` (`full-text-search.db:books_text`), `book_read_excerpt`, `unread_priority_list`, and cross-library `search_all_libraries` verified with real book snippets and author/tag enrichment.
+
+*(Exact personal library names, paths, and book counts are intentionally omitted from version-controlled documentation to protect user privacy / PII.)*
 
 ---
 
@@ -48,7 +42,7 @@ All 11 live Calibre libraries on `L:\Multimedia Files\Written Word\` were automa
 
 - `cargo fmt --all --check`: **PASS**
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: **PASS** (0 warnings, 0 errors)
-- `cargo test --workspace`: **PASS** (27/27 tests: 19 in `calibre-core`, 4 in `rust-calibre-mcp`, 4 in `calibre-app` including `glyph_source_scan` and `glyph_allowlist`)
+- `cargo test --workspace`: **PASS** (28/28 tests: 20 in `calibre-core`, 4 in `rust-calibre-mcp`, 4 in `calibre-app` including `glyph_source_scan` and `glyph_allowlist`)
 - `cargo run -q -p calibre-app -- --smoke`: **PASS** (`smoke: status + demo query_books (6) + demo library_health OK`)
 - MCP JSON-RPC 2.0 `mcp-stdio` round-trip probe: **PASS** (5/5 responses for `initialize`, `tools/list`, `calibre.library_stats`, legacy alias `manage_libraries`, and legacy alias `search_fulltext`)
-- Legacy `D:\Dev\repos\calibre-mcp` untouched check (`git status -s`): **PASS** (0 modified/untracked files)
+- Legacy `calibre-mcp` untouched check (`git status -s`): **PASS** (0 modified/untracked files)

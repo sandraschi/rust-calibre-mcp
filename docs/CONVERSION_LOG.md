@@ -1,15 +1,15 @@
 # Conversion Audit Log: `rust-calibre-mcp`
 
 ## [2026-10-18T00:55:49+02:00] Phase 0 & Phase 1 (Automated `New-RustArtcraftRepo.ps1` Stamp)
-- Verified legacy repo `D:\Dev\repos\calibre-mcp` at `master@5abaad6` (kept 100% read-only).
-- Copied reusable kernel modules from `D:\Dev\repos\rust-devices-mcp`:
+- Verified legacy repo `../calibre-mcp` at `master@5abaad6` (kept 100% read-only).
+- Copied reusable kernel modules from `rust-devices-mcp`:
   - `crates/calibre-core/src/{bridge.rs, llm.rs (gemma4:12b default), error.rs, creds.rs}`
   - `crates/calibre-app/src/{vault.rs, registry.rs}`
-- Generated and completed `docs/CONVERSION_DOSSIER.md` with all 29 legacy `@mcp.tool` definitions, 11 live Calibre libraries on `L:\Multimedia Files\Written Word\`, and the custom FTS5 tokenizer bypass strategy.
+- Generated and completed `docs/CONVERSION_DOSSIER.md` with all 29 legacy `@mcp.tool` definitions, local multi-library discovery spec, and the custom FTS5 tokenizer bypass strategy.
 - Committed Phase 0 & Phase 1 baseline (`e444627`).
 
 ## [2026-10-18T01:40:00+02:00] Phase 2 (`crates/calibre-core` L1 Pure Library)
-- Implemented `crates/calibre-core/src/import.rs` (auto-discovers libraries from explicit arg, `CALIBRE_LIBRARY_PATH`, `%APPDATA%\calibre\gui.json`, `global.py.json`, and `L:\Multimedia Files\Written Word\*`).
+- Implemented `crates/calibre-core/src/import.rs` (auto-discovers libraries from explicit arg, `CALIBRE_LIBRARY_PATH`, `%APPDATA%\calibre\gui.json`, `global.py.json`, `../calibre-mcp/config.json`, and sibling library folders).
 - Implemented `crates/calibre-core/src/calibre_db.rs`:
   - Strict read-only SQLite helper (`OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX` + `busy_timeout(5000 ms)`).
   - Full-text search on `full-text-search.db:books_text` bypassing Calibre's custom `calibre remove_diacritics` FTS5 C tokenizer.
@@ -24,7 +24,7 @@
 
 ## [2026-10-18T01:49:00+02:00] Phase 4 (`crates/calibre-app` L3 Native `egui` 0.37 Desktop App)
 - Implemented `crates/calibre-app/src/{main.rs, app.rs, vault.rs, registry.rs}`:
-  - 9 pages: `Libraries`, `Books` (with live `cover.jpg` texture rendering, paginated `full-text-search.db` excerpt reader, and federated 11-library search), `Fulltext`, `Analytics` (Health KPIs, Publication Decade bar chart, Series Gap Detector, and Unread Priority Queue), `Chat` (`gemma4:12b`), `Crossconnect`, `Settings`, `Help`, `RawJson`.
+  - 9 pages: `Libraries`, `Books` (with live `cover.jpg` texture rendering, paginated `full-text-search.db` excerpt reader, and federated multi-library search), `Fulltext`, `Analytics` (Health KPIs, Publication Decade bar chart, Series Gap Detector, and Unread Priority Queue), `Chat` (`gemma4:12b`), `Crossconnect`, `Settings`, `Help`, `RawJson`.
   - Off-thread async worker queue (`self.spawn(...)`), `Ctrl+Wheel` zoom (`0.5`..`2.0`), custom painted Sun/Moon theme toggle, window icon (`icons/icon.png`), and `--smoke` headless mode.
 
 ## [2026-10-18T03:23:00+02:00] Phase 5 & Deep Parity Upgrade (23 Commands, Packaging, & Live Oracle Probes)
@@ -34,11 +34,11 @@
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: **PASS** (0 warnings)
 - `cargo test --workspace`: **PASS** (28/28 tests passing across all 3 crates)
 - `cargo run -q -p calibre-app -- --smoke`: **PASS** (`smoke: status + demo query_books (6) + demo library_health OK`)
-- Live SQLite Oracle Probes against `L:\Multimedia Files\Written Word\`:
-  - `book-cover --library "Calibre-Bibliothek" --book-id 1274`: **PASS** (loaded cover bytes for *Men at Arms*)
-  - `book-excerpt --library "Calibre-Bibliothek IT" --book-id 4 --max-chars 350`: **PASS** (`full-text-search.db:books_text`)
-  - `reading-stats --library "Calibre-Bibliothek"`: **PASS** (languages, top 20 publishers, decades, ratings)
-  - `unread-priority --library "Calibre-Bibliothek IT" --limit 3`: **PASS** (ranked priority queue with scores & reasons)
-  - `search-all --query "Python" --limit-per-library 2`: **PASS** (federated search across all discovered libraries)
-  - `book-update --library "Calibre-Bibliothek" --book-id 1274 --title "Dry Run Preview Title"`: **PASS** (`dry_run: true, committed: false`)
-- Confirmed legacy `D:\Dev\repos\calibre-mcp` has 0 modified/untracked files (`git status -s` empty).
+- Live SQLite Oracle Probes against local Calibre libraries (personal paths and counts redacted):
+  - `book-cover`: **PASS** (loaded cover bytes from disk)
+  - `book-excerpt`: **PASS** (`full-text-search.db:books_text`)
+  - `reading-stats`: **PASS** (languages, top 20 publishers, decades, ratings)
+  - `unread-priority`: **PASS** (ranked priority queue with scores & reasons)
+  - `search-all`: **PASS** (federated search across all discovered libraries)
+  - `book-update`: **PASS** (`dry_run: true, committed: false`)
+- Confirmed legacy `calibre-mcp` has 0 modified/untracked files (`git status -s` empty).
