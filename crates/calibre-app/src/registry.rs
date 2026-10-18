@@ -1,9 +1,6 @@
-//! Joe Schmoe device registry: adopted scan hits + manual entries.
+//! Custom Calibre library registry: user-pinned library paths.
 //!
-//! Fleet-imported devices live in the Python checkout (source of truth);
-//! THIS registry holds what the operator adopted or typed by hand. Stored
-//! as plain JSON next to `ui.json` (IPs and labels only — secrets stay in
-//! the OS vault, never here). Corrupt file → empty registry, never a crash.
+//! Stored as plain JSON next to `ui.json`. Corrupt file -> empty registry, never a crash.
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
@@ -12,27 +9,22 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegDevice {
-    pub id: String,
-    pub kind: String,
-    pub vendor: String,
-    pub label: String,
-    pub ip: String,
-    pub port: Option<u16>,
-    pub username: String,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegLibrary {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
-    pub devices: Vec<RegDevice>,
+    pub libraries: Vec<RegLibrary>,
 }
 
 pub fn path() -> Option<std::path::PathBuf> {
     std::env::var("LOCALAPPDATA").ok().map(|base| {
         std::path::PathBuf::from(base)
             .join("rust-calibre-mcp")
-            .join("devices.json")
+            .join("libraries.json")
     })
 }
 
@@ -56,28 +48,16 @@ pub fn save(registry: &Registry) {
     }
 }
 
-pub fn adopt(ip: &str, port: u16, kind: &str, label: &str) -> RegDevice {
-    let (kind, vendor) = match kind {
-        "hue" => ("hue".to_string(), String::new()),
-        "shelly" => ("plug".to_string(), "shelly".to_string()),
-        "kasa?" => ("plug".to_string(), "kasa".to_string()),
-        "onvif?" => ("camera".to_string(), "onvif".to_string()),
-        "rtsp?" => ("camera".to_string(), "tapo".to_string()),
-        other => ("generic".to_string(), other.to_string()),
-    };
-    RegDevice {
-        id: format!("{kind}:{ip}:{port}"),
-        kind,
-        vendor,
-        label: if label.trim().is_empty() {
-            ip.to_string()
-        } else {
-            label.trim().to_string()
-        },
-        ip: ip.trim().to_string(),
-        port: Some(port),
-        username: String::new(),
+pub fn pin_active(name: &str, lib_path: &str) -> Registry {
+    let mut reg = load();
+    if !reg.libraries.iter().any(|l| l.name == name) {
+        reg.libraries.push(RegLibrary {
+            name: name.to_string(),
+            path: lib_path.to_string(),
+        });
+        save(&reg);
     }
+    reg
 }
 
 #[cfg(test)]
@@ -85,19 +65,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adopt_maps_kinds() {
-        let hue = adopt("192.168.0.5", 80, "hue", "Hall");
-        assert_eq!(hue.kind, "hue");
-        let kasa = adopt("192.168.0.6", 9999, "kasa?", "");
-        assert_eq!(kasa.vendor, "kasa");
-        assert_eq!(kasa.label, "192.168.0.6");
-    }
-
-    #[test]
     fn corrupt_file_is_empty_registry() {
-        // save() to a bogus LOCALAPPDATA would touch the real machine —
-        // instead assert the deserializer's fallback directly.
         let registry: Registry = serde_json::from_str("not json{{").unwrap_or_default();
-        assert!(registry.devices.is_empty());
+        assert!(registry.libraries.is_empty());
     }
 }
