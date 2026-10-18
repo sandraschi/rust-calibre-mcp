@@ -60,12 +60,28 @@ pub enum Theme {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    // CONTENT
     Libraries,
     Books,
+    Authors,
+    Series,
+    Tags,
+    Publishers,
+
+    // DISCOVER
     Fulltext,
-    Analytics,
-    Crossconnect,
+    Reading,
+    Duplicates,
+
+    // MANAGE
+    Health,
+
+    // AI & FLEET
     Chat,
+    Crossconnect,
+
+    // SYSTEM
+    Logs,
     Settings,
     Help,
     RawJson,
@@ -84,6 +100,9 @@ enum Job {
     Series(Value),
     ReadingStats(Value),
     UnreadPriority(Value),
+    Authors(Value),
+    Tags(Value),
+    Duplicates(Value),
     ChatReply(Value),
     StatusNote(String, Value),
     VaultLoaded {
@@ -117,6 +136,9 @@ pub struct CalibreApp {
     series_val: Value,
     reading_stats_val: Value,
     priority_val: Value,
+    authors_val: Value,
+    tags_val: Value,
+    duplicates_val: Value,
     last_raw: Value,
     // Search & filter inputs
     q_text: String,
@@ -125,6 +147,7 @@ pub struct CalibreApp {
     q_series: String,
     q_format: String,
     fts_query: String,
+    author_letter_filter: Option<char>,
     // Chat state (`gemma4:12b` default)
     chat_provider: String,
     chat_model: String,
@@ -147,6 +170,9 @@ pub struct CalibreApp {
     custom_library_name: String,
     custom_library_path: String,
     pinned_registry: crate::registry::Registry,
+    // System logs & diagnostics state
+    event_logs: Vec<String>,
+    log_filter: String,
 }
 
 pub fn harsh_visuals() -> egui::Visuals {
@@ -309,6 +335,9 @@ impl CalibreApp {
             series_val: json!({}),
             reading_stats_val: json!({}),
             priority_val: json!({}),
+            authors_val: json!({}),
+            tags_val: json!({}),
+            duplicates_val: json!({}),
             last_raw: json!({}),
             q_text: String::new(),
             q_author: String::new(),
@@ -316,6 +345,7 @@ impl CalibreApp {
             q_series: String::new(),
             q_format: String::new(),
             fts_query: String::new(),
+            author_letter_filter: None,
             chat_provider: "ollama".to_string(),
             chat_model: "gemma4:12b".to_string(),
             chat_prompt:
@@ -337,6 +367,8 @@ impl CalibreApp {
             custom_library_name: String::new(),
             custom_library_path: String::new(),
             pinned_registry: crate::registry::load(),
+            event_logs: vec!["[+0s] Calibre Rust desktop app initialized.".to_string()],
+            log_filter: String::new(),
         };
         app.spawn_libraries();
         app.spawn_query_books();
@@ -516,42 +548,178 @@ impl CalibreApp {
         });
     }
 
-    fn spawn_analytics(&mut self) {
+    fn log(&mut self, msg: impl Into<String>) {
+        let text = msg.into();
+        self.status_line = text.clone();
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entry = format!("[+{secs}s] {text}");
+        self.event_logs.push(entry);
+        if self.event_logs.len() > 1000 {
+            self.event_logs.remove(0);
+        }
+    }
+
+    fn spawn_authors(&mut self) {
+        let lib = if self.active_library.is_empty() {
+            None
+        } else {
+            Some(self.active_library.clone())
+        };
+        let q = if self.q_author.trim().is_empty() {
+            None
+        } else {
+            Some(self.q_author.trim().to_string())
+        };
+        self.log(format!("Listing authors for {}", self.active_library));
+        self.spawn(move || async move {
+            Job::Authors(
+                dispatch(Command::AuthorsList {
+                    library: lib,
+                    query: q,
+                    limit: 150,
+                })
+                .await,
+            )
+        });
+    }
+
+    fn spawn_tags(&mut self) {
+        let lib = if self.active_library.is_empty() {
+            None
+        } else {
+            Some(self.active_library.clone())
+        };
+        let q = if self.q_tag.trim().is_empty() {
+            None
+        } else {
+            Some(self.q_tag.trim().to_string())
+        };
+        self.log(format!("Listing tags for {}", self.active_library));
+        self.spawn(move || async move {
+            Job::Tags(
+                dispatch(Command::TagsList {
+                    library: lib,
+                    query: q,
+                    limit: 200,
+                })
+                .await,
+            )
+        });
+    }
+
+    fn spawn_series(&mut self) {
+        let lib = if self.active_library.is_empty() {
+            None
+        } else {
+            Some(self.active_library.clone())
+        };
+        let q = if self.q_series.trim().is_empty() {
+            None
+        } else {
+            Some(self.q_series.trim().to_string())
+        };
+        self.log(format!("Analyzing series for {}", self.active_library));
+        self.spawn(move || async move {
+            Job::Series(
+                dispatch(Command::SeriesAnalysis {
+                    library: lib,
+                    query: q,
+                    limit: 100,
+                })
+                .await,
+            )
+        });
+    }
+
+    fn spawn_duplicates(&mut self) {
+        let lib = if self.active_library.is_empty() {
+            None
+        } else {
+            Some(self.active_library.clone())
+        };
+        self.log(format!(
+            "Scanning duplicate books in {}",
+            self.active_library
+        ));
+        self.spawn(move || async move {
+            Job::Duplicates(
+                dispatch(Command::FindDuplicates {
+                    library: lib,
+                    limit: 60,
+                })
+                .await,
+            )
+        });
+    }
+
+    fn spawn_health(&mut self) {
+        let lib = if self.active_library.is_empty() {
+            None
+        } else {
+            Some(self.active_library.clone())
+        };
+        self.log(format!(
+            "Auditing library health for {}",
+            self.active_library
+        ));
+        self.spawn(move || async move {
+            Job::Health(dispatch(Command::LibraryHealth { library: lib }).await)
+        });
+    }
+
+    fn spawn_reading(&mut self) {
         let lib1 = if self.active_library.is_empty() {
             None
         } else {
             Some(self.active_library.clone())
         };
         let lib2 = lib1.clone();
-        let lib3 = lib1.clone();
-        let lib4 = lib1.clone();
-        self.status_line =
-            "Running library health, reading stats & canon coverage audit…".to_string();
+        self.log(format!(
+            "Fetching reading statistics for {}",
+            self.active_library
+        ));
         self.spawn(move || async move {
-            Job::Health(dispatch(Command::LibraryHealth { library: lib1 }).await)
-        });
-        self.spawn(move || async move {
-            Job::Series(
-                dispatch(Command::SeriesAnalysis {
-                    library: lib2,
-                    query: None,
-                    limit: 40,
-                })
-                .await,
-            )
-        });
-        self.spawn(move || async move {
-            Job::ReadingStats(dispatch(Command::ReadingStats { library: lib3 }).await)
+            Job::ReadingStats(dispatch(Command::ReadingStats { library: lib1 }).await)
         });
         self.spawn(move || async move {
             Job::UnreadPriority(
                 dispatch(Command::UnreadPriority {
-                    library: lib4,
-                    limit: 15,
+                    library: lib2,
+                    limit: 30,
                 })
                 .await,
             )
         });
+    }
+
+    fn set_page(&mut self, p: Page) {
+        self.page = p;
+        match p {
+            Page::Authors if self.authors_val.get("authors").is_none() => {
+                self.spawn_authors();
+            }
+            Page::Series if self.series_val.get("series").is_none() => {
+                self.spawn_series();
+            }
+            Page::Tags if self.tags_val.get("tags").is_none() => {
+                self.spawn_tags();
+            }
+            Page::Publishers | Page::Reading
+                if self.reading_stats_val.get("top_publishers").is_none() =>
+            {
+                self.spawn_reading();
+            }
+            Page::Duplicates if self.duplicates_val.get("duplicate_groups").is_none() => {
+                self.spawn_duplicates();
+            }
+            Page::Health if self.health_val.get("total_books").is_none() => {
+                self.spawn_health();
+            }
+            _ => {}
+        }
     }
 
     fn drain_jobs(&mut self, ctx: &egui::Context) {
@@ -622,6 +790,35 @@ impl CalibreApp {
                 }
                 Job::UnreadPriority(v) => {
                     self.priority_val = v;
+                }
+                Job::Authors(v) => {
+                    let count = v
+                        .get("authors")
+                        .and_then(Value::as_array)
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    self.status_line = format!("Loaded {count} authors");
+                    self.last_raw = v.clone();
+                    self.authors_val = v;
+                }
+                Job::Tags(v) => {
+                    let count = v
+                        .get("tags")
+                        .and_then(Value::as_array)
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    self.status_line = format!("Loaded {count} tags");
+                    self.last_raw = v.clone();
+                    self.tags_val = v;
+                }
+                Job::Duplicates(v) => {
+                    let count = v
+                        .get("total_duplicate_clusters")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    self.status_line = format!("Found {count} duplicate clusters");
+                    self.last_raw = v.clone();
+                    self.duplicates_val = v;
                 }
                 Job::ChatReply(v) => {
                     if let Some(r) = v.get("reply").and_then(Value::as_str) {
@@ -793,8 +990,8 @@ impl CalibreApp {
                             }
                             if ui.button("Health Audit").clicked() {
                                 self.active_library = name.to_string();
-                                self.spawn_analytics();
-                                self.page = Page::Analytics;
+                                self.spawn_health();
+                                self.page = Page::Health;
                             }
                         });
                     });
@@ -1118,12 +1315,503 @@ impl CalibreApp {
         });
     }
 
-    fn view_analytics(&mut self, ui: &mut egui::Ui) {
+    fn view_authors(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Library Health, Reading Statistics & Unread Priority");
-            if ui.button("Run Audit").clicked() {
-                self.spawn_analytics();
-            }
+            ui.heading("Authors");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Scan Authors").clicked() {
+                    self.spawn_authors();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        card_frame(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Filter by Initial:").strong());
+                let all_selected = self.author_letter_filter.is_none();
+                if ui.selectable_label(all_selected, "All").clicked() {
+                    self.author_letter_filter = None;
+                }
+                for ch in 'A'..='Z' {
+                    let is_sel = self.author_letter_filter == Some(ch);
+                    let label = ch.to_string();
+                    if ui.selectable_label(is_sel, label).clicked() {
+                        self.author_letter_filter = Some(ch);
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Search Author Name:");
+                let resp = ui.text_edit_singleline(&mut self.q_author);
+                if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Search").clicked()
+                {
+                    self.spawn_authors();
+                }
+                if ui.button("Clear").clicked() {
+                    self.q_author.clear();
+                    self.author_letter_filter = None;
+                    self.spawn_authors();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let authors_arr = self
+            .authors_val
+            .get("authors")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        let filtered: Vec<&Value> = authors_arr
+            .iter()
+            .filter(|a| {
+                let name = a.get("name").and_then(Value::as_str).unwrap_or("");
+                if let Some(target_initial) = self.author_letter_filter {
+                    let first_ch = name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+                    if first_ch != target_initial {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        ui.label(RichText::new(format!("Displaying {} authors", filtered.len())).weak());
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("authors_scroll")
+            .show(ui, |ui| {
+                let mut pick_author = None;
+                for a in filtered {
+                    let name = a.get("name").and_then(Value::as_str).unwrap_or("Unknown");
+                    let count = a.get("book_count").and_then(Value::as_i64).unwrap_or(0);
+                    card_frame(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(name).strong());
+                            ui.label(RichText::new(format!("· {count} books")).weak());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Browse Books").clicked() {
+                                        pick_author = Some(name.to_string());
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    ui.add_space(3.0);
+                }
+                if let Some(auth) = pick_author {
+                    self.q_author = auth;
+                    self.q_text.clear();
+                    self.q_tag.clear();
+                    self.q_series.clear();
+                    self.spawn_query_books();
+                    self.page = Page::Books;
+                }
+            });
+    }
+
+    fn view_series(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Series & Canon Coverage");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Analyze Series").clicked() {
+                    self.spawn_series();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        card_frame(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Filter Series Name:");
+                let resp = ui.text_edit_singleline(&mut self.q_series);
+                if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Search").clicked()
+                {
+                    self.spawn_series();
+                }
+                if ui.button("Clear").clicked() {
+                    self.q_series.clear();
+                    self.spawn_series();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let series_arr = self
+            .series_val
+            .get("series")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        ui.label(RichText::new(format!("Discovered {} series", series_arr.len())).weak());
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("series_scroll")
+            .show(ui, |ui| {
+                let mut pick_series = None;
+                for s in &series_arr {
+                    let name = s.get("name").and_then(Value::as_str).unwrap_or("Series");
+                    let cnt = s.get("book_count").and_then(Value::as_i64).unwrap_or(0);
+                    let missing = s
+                        .get("missing_indices")
+                        .and_then(Value::as_array)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    card_frame(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(name).strong());
+                            ui.label(format!("· {cnt} volume(s)"));
+                            if missing == 0 {
+                                ui.label(RichText::new("· Complete").color(EMERALD));
+                            } else {
+                                ui.label(
+                                    RichText::new(format!("· {missing} missing volume(s)"))
+                                        .color(AMBER),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Browse Series Books").clicked() {
+                                        pick_series = Some(name.to_string());
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    ui.add_space(3.0);
+                }
+                if let Some(ser) = pick_series {
+                    self.q_series = ser;
+                    self.q_text.clear();
+                    self.q_author.clear();
+                    self.q_tag.clear();
+                    self.spawn_query_books();
+                    self.page = Page::Books;
+                }
+            });
+    }
+
+    fn view_tags(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Tags & Taxonomy");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Scan Tags").clicked() {
+                    self.spawn_tags();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        card_frame(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Search Tags:");
+                let resp = ui.text_edit_singleline(&mut self.q_tag);
+                if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Search").clicked()
+                {
+                    self.spawn_tags();
+                }
+                if ui.button("Clear").clicked() {
+                    self.q_tag.clear();
+                    self.spawn_tags();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let tags_arr = self
+            .tags_val
+            .get("tags")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        ui.label(RichText::new(format!("Discovered {} tags", tags_arr.len())).weak());
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("tags_scroll")
+            .show(ui, |ui| {
+                let mut pick_tag = None;
+                ui.horizontal_wrapped(|ui| {
+                    for t in &tags_arr {
+                        let name = t.get("name").and_then(Value::as_str).unwrap_or("tag");
+                        let count = t.get("book_count").and_then(Value::as_i64).unwrap_or(0);
+                        let label = format!("{name} ({count})");
+                        if ui.button(label).clicked() {
+                            pick_tag = Some(name.to_string());
+                        }
+                    }
+                });
+                if let Some(tag) = pick_tag {
+                    self.q_tag = tag;
+                    self.q_text.clear();
+                    self.q_author.clear();
+                    self.q_series.clear();
+                    self.spawn_query_books();
+                    self.page = Page::Books;
+                }
+            });
+    }
+
+    fn view_publishers(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Publishers");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Scan Publishers").clicked() {
+                    self.spawn_reading();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let pubs = self
+            .reading_stats_val
+            .get("top_publishers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        ui.label(RichText::new(format!("Top {} Publishers by Book Volume", pubs.len())).weak());
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("publishers_scroll")
+            .show(ui, |ui| {
+                let mut pick_pub = None;
+                for p in &pubs {
+                    let name = p
+                        .get("publisher")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Unknown");
+                    let count = p.get("book_count").and_then(Value::as_i64).unwrap_or(0);
+                    card_frame(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(name).strong());
+                            ui.label(RichText::new(format!("· {count} books")).weak());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Search Books").clicked() {
+                                        pick_pub = Some(name.to_string());
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    ui.add_space(3.0);
+                }
+                if let Some(pub_name) = pick_pub {
+                    self.q_text = pub_name;
+                    self.spawn_query_books();
+                    self.page = Page::Books;
+                }
+            });
+    }
+
+    fn view_reading(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Reading & Priorities");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Recalculate Priorities").clicked() {
+                    self.spawn_reading();
+                }
+            });
+        });
+        ui.add_space(8.0);
+
+        let total_books = self
+            .reading_stats_val
+            .get("total_books")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let unread_books = self
+            .reading_stats_val
+            .get("unread_books")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let read_books = total_books.saturating_sub(unread_books);
+
+        ui.horizontal_wrapped(|ui| {
+            hero_kpi(ui, "Collection Size", &total_books.to_string(), ACCENT);
+            hero_kpi(ui, "Read Books", &read_books.to_string(), EMERALD);
+            hero_kpi(ui, "Unread Queue", &unread_books.to_string(), AMBER);
+        });
+        ui.add_space(10.0);
+
+        let decades_bars: Vec<(String, f64)> = self
+            .reading_stats_val
+            .get("decades")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .take(10)
+                    .map(|d| {
+                        (
+                            d.get("decade")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Unknown")
+                                .to_string(),
+                            d.get("book_count").and_then(Value::as_i64).unwrap_or(0) as f64,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !decades_bars.is_empty() {
+            card_frame(ui, |ui| {
+                bar_chart(ui, "Books by Publication Decade", &decades_bars, ACCENT);
+            });
+            ui.add_space(8.0);
+        }
+
+        if let Some(prio_arr) = self
+            .priority_val
+            .get("priority_queue")
+            .and_then(Value::as_array)
+            .cloned()
+        {
+            card_frame(ui, |ui| {
+                ui.label(RichText::new("Unread Priority Queue (Top Ranked)").strong());
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("unread_priority_page_scroll")
+                    .max_height(350.0)
+                    .show(ui, |ui| {
+                        for p in prio_arr {
+                            let bid = p.get("id").and_then(Value::as_i64).unwrap_or(0);
+                            let title = p.get("title").and_then(Value::as_str).unwrap_or("Book");
+                            let score =
+                                p.get("priority_score").and_then(Value::as_i64).unwrap_or(0);
+                            let reason = p.get("reason").and_then(Value::as_str).unwrap_or("");
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("[{score} pts]"))
+                                        .color(EMERALD)
+                                        .strong(),
+                                );
+                                ui.label(RichText::new(title).strong());
+                                if ui.button("Inspect").clicked() {
+                                    self.spawn_book_detail(bid);
+                                    self.page = Page::Books;
+                                }
+                            });
+                            ui.label(RichText::new(reason).size(11.0).weak());
+                            ui.add_space(3.0);
+                        }
+                    });
+            });
+        }
+    }
+
+    fn view_duplicates(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Duplicate Book Detection");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Scan Duplicates").clicked() {
+                    self.spawn_duplicates();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let dup_groups = self
+            .duplicates_val
+            .get("duplicate_groups")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        ui.label(RichText::new(format!("Found {} duplicate groups", dup_groups.len())).weak());
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("duplicates_scroll")
+            .show(ui, |ui| {
+                let mut inspect_id = None;
+                for group in &dup_groups {
+                    let key = group
+                        .get("normalized_title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Duplicate");
+                    let items = group
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    card_frame(ui, |ui| {
+                        ui.label(RichText::new(format!("Group: {key}")).strong().color(ROSE));
+                        ui.add_space(2.0);
+                        for item in items {
+                            let bid = item.get("id").and_then(Value::as_i64).unwrap_or(0);
+                            let title = item.get("title").and_then(Value::as_str).unwrap_or("");
+                            let author = item.get("author").and_then(Value::as_str).unwrap_or("");
+                            let fmts = item
+                                .get("formats")
+                                .and_then(Value::as_array)
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(Value::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
+                                .unwrap_or_default();
+                            ui.horizontal(|ui| {
+                                ui.label(format!("#{bid}"));
+                                ui.label(RichText::new(title).strong());
+                                if !author.is_empty() {
+                                    ui.label(format!("by {author}"));
+                                }
+                                if !fmts.is_empty() {
+                                    ui.label(RichText::new(format!("[{fmts}]")).weak());
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Inspect").clicked() {
+                                            inspect_id = Some(bid);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                if let Some(bid) = inspect_id {
+                    self.spawn_book_detail(bid);
+                    self.page = Page::Books;
+                }
+            });
+    }
+
+    fn view_health(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Library Health Audit");
+            ui.label(RichText::new(format!("· Active: {}", self.active_library)).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Run Audit").clicked() {
+                    self.spawn_health();
+                }
+            });
         });
         ui.add_space(8.0);
 
@@ -1161,107 +1849,68 @@ impl CalibreApp {
         });
         ui.add_space(10.0);
 
-        let decades_bars: Vec<(String, f64)> = self
-            .reading_stats_val
-            .get("decades")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .take(10)
-                    .map(|d| {
-                        (
-                            d.get("decade")
-                                .and_then(Value::as_str)
-                                .unwrap_or("Unknown")
-                                .to_string(),
-                            d.get("book_count").and_then(Value::as_i64).unwrap_or(0) as f64,
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if !decades_bars.is_empty() {
-            card_frame(ui, |ui| {
-                bar_chart(ui, "Books by Publication Decade", &decades_bars, ACCENT);
-            });
-            ui.add_space(8.0);
-        }
-
-        ui.columns(2, |cols| {
-            if let Some(series_arr) = self.series_val.get("series").and_then(Value::as_array) {
-                card_frame(&mut cols[0], |ui| {
-                    ui.label(RichText::new("Series & Canon Coverage (Gap Detector)").strong());
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("series_gap_scroll")
-                        .max_height(260.0)
-                        .show(ui, |ui| {
-                            for s in series_arr {
-                                let name =
-                                    s.get("name").and_then(Value::as_str).unwrap_or("Series");
-                                let cnt = s.get("book_count").and_then(Value::as_i64).unwrap_or(0);
-                                let missing = s
-                                    .get("missing_indices")
-                                    .and_then(Value::as_array)
-                                    .map(|m| m.len())
-                                    .unwrap_or(0);
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(name).strong());
-                                    ui.label(format!("· {cnt} volumes"));
-                                    if missing == 0 {
-                                        ui.label(RichText::new("· Complete").color(EMERALD));
-                                    } else {
-                                        ui.label(
-                                            RichText::new(format!("· {missing} missing volume(s)"))
-                                                .color(AMBER),
-                                        );
-                                    }
-                                });
-                            }
-                        });
-                });
-            }
-
-            if let Some(prio_arr) = self
-                .priority_val
-                .get("priority_queue")
-                .and_then(Value::as_array)
-                .cloned()
-            {
-                card_frame(&mut cols[1], |ui| {
-                    ui.label(RichText::new("Unread Priority Queue (Top Ranked)").strong());
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("unread_priority_scroll")
-                        .max_height(260.0)
-                        .show(ui, |ui| {
-                            for p in prio_arr {
-                                let bid = p.get("id").and_then(Value::as_i64).unwrap_or(0);
-                                let title =
-                                    p.get("title").and_then(Value::as_str).unwrap_or("Book");
-                                let score =
-                                    p.get("priority_score").and_then(Value::as_i64).unwrap_or(0);
-                                let reason = p.get("reason").and_then(Value::as_str).unwrap_or("");
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(format!("[{score} pts]"))
-                                            .color(EMERALD)
-                                            .strong(),
-                                    );
-                                    ui.label(RichText::new(title).strong());
-                                    if ui.button("Inspect").clicked() {
-                                        self.spawn_book_detail(bid);
-                                        self.page = Page::Books;
-                                    }
-                                });
-                                ui.label(RichText::new(reason).size(11.0).weak());
-                                ui.add_space(3.0);
-                            }
-                        });
-                });
-            }
+        card_frame(ui, |ui| {
+            ui.label(RichText::new("Integrity & Quality Breakdown").strong());
+            ui.add_space(4.0);
+            let missing_covers = self
+                .health_val
+                .get("missing_covers")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let missing_comments = self
+                .health_val
+                .get("missing_comments")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let empty_tags = self
+                .health_val
+                .get("books_without_tags")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            ui.label(format!("· Missing Covers: {missing_covers} book(s)"));
+            ui.label(format!(
+                "· Missing Synopsis / Comments: {missing_comments} book(s)"
+            ));
+            ui.label(format!("· Untagged Volumes: {empty_tags} book(s)"));
+            ui.add_space(4.0);
+            ui.label(RichText::new("All SQLite connections strictly enforce SQLITE_OPEN_READ_ONLY to prevent metadata.db lock contention.").weak());
         });
+    }
+
+    fn view_logs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("System Logs & Engine Diagnostics");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Clear Logs").clicked() {
+                    self.event_logs.clear();
+                    self.log("Logs cleared by user");
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        card_frame(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Filter Logs:");
+                ui.text_edit_singleline(&mut self.log_filter);
+                if ui.button("Reset Filter").clicked() {
+                    self.log_filter.clear();
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let filter_lower = self.log_filter.to_lowercase();
+        egui::ScrollArea::vertical()
+            .id_salt("event_logs_scroll")
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &self.event_logs {
+                    if filter_lower.is_empty() || line.to_lowercase().contains(&filter_lower) {
+                        ui.label(RichText::new(line).font(FontId::monospace(12.0)));
+                    }
+                }
+            });
     }
 
     fn view_crossconnect(&mut self, ui: &mut egui::Ui) {
@@ -1496,7 +2145,7 @@ impl CalibreApp {
                     if let Some((name, path)) = switch_item {
                         self.active_library = path;
                         self.spawn_query_books();
-                        self.spawn_analytics();
+                        self.spawn_health();
                         self.status_line = format!("Switched active library to '{name}'");
                     }
                     if let Some(name) = remove_name {
@@ -1937,43 +2586,86 @@ impl eframe::App for CalibreApp {
 
         if self.sidebar_open {
             egui::Panel::left("calibre_sidebar")
-                .default_size(185.0)
+                .default_size(190.0)
                 .show(ui, |ui| {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("LIBRARY").size(11.0).weak());
-                    for (p, label) in [
-                        (Page::Libraries, "Libraries"),
-                        (Page::Books, "Books & Inspector"),
-                        (Page::Fulltext, "Full-Text Search"),
-                        (Page::Analytics, "Health & Series"),
-                    ] {
-                        if ui.selectable_label(self.page == p, label).clicked() {
-                            self.page = p;
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("CONTENT").size(10.5).strong().weak());
+                        for (p, label) in [
+                            (Page::Libraries, "Libraries"),
+                            (Page::Books, "Books & Inspector"),
+                            (Page::Authors, "Authors"),
+                            (Page::Series, "Series"),
+                            (Page::Tags, "Tags"),
+                            (Page::Publishers, "Publishers"),
+                        ] {
+                            if ui.selectable_label(self.page == p, label).clicked() {
+                                self.set_page(p);
+                            }
                         }
-                    }
-                    ui.separator();
-                    ui.label(RichText::new("FLEET & AI").size(11.0).weak());
-                    for (p, label) in [
-                        (Page::Chat, "AI Librarian (Gemma 4)"),
-                        (Page::Crossconnect, "Crossconnect"),
-                        (Page::Settings, "Settings & Vault"),
-                        (Page::Help, "Help"),
-                        (Page::RawJson, "Raw JSON"),
-                    ] {
-                        if ui.selectable_label(self.page == p, label).clicked() {
-                            self.page = p;
+
+                        ui.separator();
+                        ui.label(RichText::new("DISCOVER").size(10.5).strong().weak());
+                        for (p, label) in [
+                            (Page::Fulltext, "Full-Text Search"),
+                            (Page::Reading, "Reading & Priorities"),
+                            (Page::Duplicates, "Duplicates"),
+                        ] {
+                            if ui.selectable_label(self.page == p, label).clicked() {
+                                self.set_page(p);
+                            }
                         }
-                    }
+
+                        ui.separator();
+                        ui.label(RichText::new("MANAGE").size(10.5).strong().weak());
+                        if ui
+                            .selectable_label(self.page == Page::Health, "Library Health")
+                            .clicked()
+                        {
+                            self.set_page(Page::Health);
+                        }
+
+                        ui.separator();
+                        ui.label(RichText::new("AI & FLEET").size(10.5).strong().weak());
+                        for (p, label) in [
+                            (Page::Chat, "AI Librarian"),
+                            (Page::Crossconnect, "Crossconnect"),
+                        ] {
+                            if ui.selectable_label(self.page == p, label).clicked() {
+                                self.set_page(p);
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label(RichText::new("SYSTEM").size(10.5).strong().weak());
+                        for (p, label) in [
+                            (Page::Logs, "System Logs"),
+                            (Page::Settings, "Settings & Vault"),
+                            (Page::Help, "Help"),
+                            (Page::RawJson, "Raw JSON"),
+                        ] {
+                            if ui.selectable_label(self.page == p, label).clicked() {
+                                self.set_page(p);
+                            }
+                        }
+                    });
                 });
         }
 
         egui::CentralPanel::default().show(ui, |ui| match self.page {
             Page::Libraries => self.view_libraries(ui),
             Page::Books => self.view_books(ui),
+            Page::Authors => self.view_authors(ui),
+            Page::Series => self.view_series(ui),
+            Page::Tags => self.view_tags(ui),
+            Page::Publishers => self.view_publishers(ui),
             Page::Fulltext => self.view_fulltext(ui),
-            Page::Analytics => self.view_analytics(ui),
-            Page::Crossconnect => self.view_crossconnect(ui),
+            Page::Reading => self.view_reading(ui),
+            Page::Duplicates => self.view_duplicates(ui),
+            Page::Health => self.view_health(ui),
             Page::Chat => self.view_chat(ui),
+            Page::Crossconnect => self.view_crossconnect(ui),
+            Page::Logs => self.view_logs(ui),
             Page::Settings => self.view_settings(ui),
             Page::Help => self.view_help(ui),
             Page::RawJson => self.view_raw(ui),
