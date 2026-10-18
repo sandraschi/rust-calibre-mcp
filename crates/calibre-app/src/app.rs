@@ -356,7 +356,8 @@ impl CalibreApp {
     fn spawn_search_all_libraries(&mut self) {
         let q = self.q_text.trim().to_string();
         if q.is_empty() {
-            self.status_line = "Enter a search term to search across all 11 libraries.".to_string();
+            self.status_line =
+                "Enter a search term to search across all discovered libraries.".to_string();
             return;
         }
         self.status_line = format!("Searching all discovered libraries for '{q}'…");
@@ -1406,7 +1407,7 @@ impl eframe::App for CalibreApp {
                     ui.add_space(6.0);
                     ui.label(RichText::new("LIBRARY").size(11.0).weak());
                     for (p, label) in [
-                        (Page::Libraries, "Libraries (11)"),
+                        (Page::Libraries, "Libraries"),
                         (Page::Books, "Books & Inspector"),
                         (Page::Fulltext, "Full-Text Search"),
                         (Page::Analytics, "Health & Series"),
@@ -1487,7 +1488,7 @@ mod parity_tests {
     #[test]
     fn glyph_allowlist() {
         let mut harness = Harness::new_ui(|ui| {
-            ui.label("34.36 MB · 11 × 2 · querying…");
+            ui.label("4.20 MB · 3 × 2 · querying…");
         });
         harness.run();
     }
@@ -1514,13 +1515,13 @@ mod parity_tests {
     #[test]
     fn kpi_and_bar_chart_render_cleanly() {
         let mut harness = Harness::new_ui(|ui| {
-            hero_kpi(ui, "Discovered Libraries", "11", ACCENT);
+            hero_kpi(ui, "Discovered Libraries", "2", ACCENT);
             bar_chart(
                 ui,
                 "Books per Library",
                 &[
-                    ("Calibre-Bibliothek".to_string(), 12500.0),
-                    ("Calibre-Bibliothek IT".to_string(), 1840.0),
+                    ("Primary-Library".to_string(), 500.0),
+                    ("Tech-Library".to_string(), 250.0),
                 ],
                 EMERALD,
             );

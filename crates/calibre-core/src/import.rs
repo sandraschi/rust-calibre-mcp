@@ -1,9 +1,10 @@
-//! Zero-config importer for legacy `D:\Dev\repos\calibre-mcp` (`config.json` & `.env`)
+//! Zero-config importer for legacy `calibre-mcp` (`config.json` & `.env`),
+//! standard OS Calibre configuration (`%APPDATA%\calibre\gui.json` & `global.py.json`),
 //! and automatic discovery of Calibre library directories (`metadata.db` + `full-text-search.db`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Discovered Calibre library on disk.
@@ -28,7 +29,6 @@ fn legacy_repo_candidates() -> Vec<PathBuf> {
             out.push(PathBuf::from(trimmed));
         }
     }
-    out.push(PathBuf::from(r"D:\Dev\repos\calibre-mcp"));
     out.push(PathBuf::from("../calibre-mcp"));
     out
 }
@@ -124,11 +124,12 @@ fn inspect_library_dir(
     })
 }
 
-/// Discover all Calibre libraries across explicit env, sibling `calibre-mcp/config.json`,
-/// `L:\Multimedia Files\Written Word`, and `%APPDATA%\calibre\global.py.json`.
+/// Discover all Calibre libraries across explicit env, `%APPDATA%\calibre`,
+/// sibling `calibre-mcp/config.json`, and parent sibling directories.
 pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
     let mut by_name: BTreeMap<String, DiscoveredLibrary> = BTreeMap::new();
     let mut default_path: Option<String> = None;
+    let mut parent_roots: BTreeSet<PathBuf> = BTreeSet::new();
 
     // 1. Environment variable override (`CALIBRE_LIBRARY_PATH` or `CALIBRE_BASE_PATH`)
     for key in ["CALIBRE_LIBRARY_PATH", "CALIBRE_BASE_PATH"] {
@@ -140,14 +141,61 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
                 .unwrap_or_else(|| "EnvLibrary".to_string());
             if let Some(lib) = inspect_library_dir(&name, &p, true, key) {
                 default_path = Some(lib.path.clone());
+                if let Some(parent) = p.parent() {
+                    parent_roots.insert(parent.to_path_buf());
+                }
                 by_name.insert(lib.name.clone(), lib);
             } else if p.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&p) {
-                    for entry in entries.flatten() {
-                        let sub = entry.path();
-                        if sub.is_dir() {
-                            let sub_name = entry.file_name().to_string_lossy().into_owned();
-                            if let Some(lib) = inspect_library_dir(&sub_name, &sub, false, key) {
+                parent_roots.insert(p);
+            }
+        }
+    }
+
+    // 2. Standard OS Calibre config (`%APPDATA%\calibre\gui.json` and `global.py.json`)
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let cal_dir = PathBuf::from(appdata).join("calibre");
+        for cfg_name in ["gui.json", "global.py.json"] {
+            let p = cal_dir.join(cfg_name);
+            if let Ok(raw) = std::fs::read_to_string(&p) {
+                if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                    if let Some(lp) = val.get("library_path").and_then(Value::as_str) {
+                        let lp_buf = PathBuf::from(lp);
+                        let name = lp_buf
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "DefaultLibrary".to_string());
+                        if let Some(lib) = inspect_library_dir(
+                            &name,
+                            &lp_buf,
+                            default_path.is_none(),
+                            "appdata:calibre",
+                        ) {
+                            if default_path.is_none() {
+                                default_path = Some(lib.path.clone());
+                            }
+                            if let Some(parent) = lp_buf.parent() {
+                                parent_roots.insert(parent.to_path_buf());
+                            }
+                            by_name.entry(lib.name.clone()).or_insert(lib);
+                        }
+                    }
+                    if let Some(stats) = val.get("library_usage_stats").and_then(Value::as_object) {
+                        for k in stats.keys() {
+                            let lp_buf = PathBuf::from(k);
+                            let name = lp_buf
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "Library".to_string());
+                            let is_def = default_path.as_deref() == Some(k.as_str());
+                            if let Some(lib) = inspect_library_dir(
+                                &name,
+                                &lp_buf,
+                                is_def,
+                                "appdata:calibre:library_usage_stats",
+                            ) {
+                                if let Some(parent) = lp_buf.parent() {
+                                    parent_roots.insert(parent.to_path_buf());
+                                }
                                 by_name.entry(lib.name.clone()).or_insert(lib);
                             }
                         }
@@ -157,7 +205,7 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
         }
     }
 
-    // 2. Sibling `calibre-mcp/config.json`
+    // 3. Sibling `calibre-mcp/config.json`
     for root in legacy_repo_candidates() {
         let cfg_path = root.join("config.json");
         if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
@@ -167,7 +215,7 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
                     let loc_name = loc_path
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "Calibre-Bibliothek".to_string());
+                        .unwrap_or_else(|| "DefaultLibrary".to_string());
                     if let Some(lib) = inspect_library_dir(
                         &loc_name,
                         &loc_path,
@@ -176,6 +224,9 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
                     ) {
                         if default_path.is_none() {
                             default_path = Some(lib.path.clone());
+                        }
+                        if let Some(parent) = loc_path.parent() {
+                            parent_roots.insert(parent.to_path_buf());
                         }
                         by_name.entry(lib.name.clone()).or_insert(lib);
                     }
@@ -191,6 +242,9 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
                                 is_def,
                                 "calibre-mcp/config.json:discovered_libraries",
                             ) {
+                                if let Some(parent) = p.parent() {
+                                    parent_roots.insert(parent.to_path_buf());
+                                }
                                 by_name.entry(lib.name.clone()).or_insert(lib);
                             }
                         }
@@ -201,21 +255,17 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
         }
     }
 
-    // 3. Direct scan of `L:\Multimedia Files\Written Word`
-    let written_word = Path::new(r"L:\Multimedia Files\Written Word");
-    if written_word.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(written_word) {
+    // 4. Scan sibling directories of any discovered library root
+    for parent in parent_roots {
+        if let Ok(entries) = std::fs::read_dir(&parent) {
             for entry in entries.flatten() {
                 let sub = entry.path();
                 if sub.is_dir() {
                     let sub_name = entry.file_name().to_string_lossy().into_owned();
-                    let is_def = default_path.is_none() && sub_name == "Calibre-Bibliothek";
-                    if let Some(lib) = inspect_library_dir(
-                        &sub_name,
-                        &sub,
-                        is_def,
-                        "L:\\Multimedia Files\\Written Word",
-                    ) {
+                    let is_def = default_path.is_none();
+                    if let Some(lib) =
+                        inspect_library_dir(&sub_name, &sub, is_def, "sibling_library_scan")
+                    {
                         if is_def {
                             default_path = Some(lib.path.clone());
                         }
@@ -226,12 +276,10 @@ pub fn discover_libraries() -> Vec<DiscoveredLibrary> {
         }
     }
 
-    // 4. Ensure at least one library is marked default if any exist
+    // 5. Ensure at least one library is marked default if any exist
     let mut list: Vec<DiscoveredLibrary> = by_name.into_values().collect();
     if !list.iter().any(|l| l.is_default) {
-        if let Some(pref) = list.iter_mut().find(|l| l.name == "Calibre-Bibliothek") {
-            pref.is_default = true;
-        } else if let Some(first) = list.first_mut() {
+        if let Some(first) = list.first_mut() {
             first.is_default = true;
         }
     }
@@ -255,7 +303,8 @@ mod tests {
 
     #[test]
     fn dotenv_parser_handles_quotes_and_comments() {
-        let sample = "# comment\nCALIBRE_LIBRARY_PATH=\"L:\\\\Multimedia Files\\\\Written Word\\\\Calibre-Bibliothek\"\nCALIBRE_TIMEOUT=30\n";
+        let sample =
+            "# comment\nCALIBRE_LIBRARY_PATH=\"/books/MainLibrary\"\nCALIBRE_TIMEOUT=30\n";
         let map = parse_dotenv(sample);
         assert_eq!(map.get("CALIBRE_TIMEOUT").map(String::as_str), Some("30"));
         assert!(map.contains_key("CALIBRE_LIBRARY_PATH"));

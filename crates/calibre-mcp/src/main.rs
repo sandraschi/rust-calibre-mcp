@@ -292,7 +292,7 @@ pub fn tools_list() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "library": { "type": "string", "description": "Library name or path (default: Calibre-Bibliothek, or 'demo')" }
+                    "library": { "type": "string", "description": "Library name or path (default: active default library, or 'demo')" }
                 }
             }
         }),
