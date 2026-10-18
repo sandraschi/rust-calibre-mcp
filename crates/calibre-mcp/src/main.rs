@@ -4,7 +4,8 @@
 //! ArtCraft dotted/underscored tool names (`calibre.query_books` / `calibre_query_books`)
 //! and legacy Python `calibre-mcp` portmanteau tool names (`manage_libraries`,
 //! `query_books`, `manage_books`, `search_fulltext`, `manage_authors`, `manage_tags`,
-//! `get_series_analysis`, `find_duplicate_books`, `analyze_library_health`, etc.).
+//! `get_series_analysis`, `find_duplicate_books`, `analyze_library_health`, `inspect_contents`,
+//! `reading_statistics`, `unread_priority_list`, etc.).
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
@@ -13,10 +14,11 @@
 
 use calibre_core::calibre_db::BookQueryParams;
 use calibre_core::{
-    dispatch, Command, CMD_AUTHORS_LIST, CMD_BOOKCASE_CATALOG, CMD_BOOK_GET, CMD_BRIDGE_EVENT,
-    CMD_BRIDGE_SPEAK, CMD_BRIDGE_WEBHOOK, CMD_FIND_DUPLICATES, CMD_LIBRARIES_LIST,
-    CMD_LIBRARY_HEALTH, CMD_LIBRARY_STATS, CMD_LLM_CHAT, CMD_LLM_MODELS, CMD_QUERY_BOOKS,
-    CMD_SEARCH_FULLTEXT, CMD_SERIES_ANALYSIS, CMD_STATUS, CMD_TAGS_LIST,
+    dispatch, Command, CMD_AUTHORS_LIST, CMD_BOOKCASE_CATALOG, CMD_BOOK_COVER, CMD_BOOK_EXCERPT,
+    CMD_BOOK_GET, CMD_BOOK_UPDATE, CMD_BRIDGE_EVENT, CMD_BRIDGE_SPEAK, CMD_BRIDGE_WEBHOOK,
+    CMD_FIND_DUPLICATES, CMD_LIBRARIES_LIST, CMD_LIBRARY_HEALTH, CMD_LIBRARY_STATS, CMD_LLM_CHAT,
+    CMD_LLM_MODELS, CMD_QUERY_BOOKS, CMD_READING_STATS, CMD_SEARCH_ALL_LIBRARIES,
+    CMD_SEARCH_FULLTEXT, CMD_SERIES_ANALYSIS, CMD_STATUS, CMD_TAGS_LIST, CMD_UNREAD_PRIORITY,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -52,7 +54,7 @@ fn install_forensic_panic_hook() {
 #[command(
     name = "rust-calibre-mcp",
     version,
-    about = "Pure-Rust Calibre e-book library CLI & MCP 2024-11-05 stdio server"
+    about = "Native Rust Calibre Library CLI & MCP 2024-11-05 Server"
 )]
 struct Cli {
     /// Emit compact single-line JSON instead of pretty-printed JSON.
@@ -103,6 +105,40 @@ enum Sub {
         #[arg(long)]
         library: Option<String>,
     },
+    /// Inspect cover metadata and byte size for a book (`cover.jpg`).
+    BookCover {
+        #[arg(long)]
+        book_id: i64,
+        #[arg(long)]
+        library: Option<String>,
+    },
+    /// Read a character-safe excerpt of a book's text from `full-text-search.db:books_text`.
+    #[command(visible_alias = "excerpt")]
+    BookExcerpt {
+        #[arg(long)]
+        book_id: i64,
+        #[arg(long)]
+        library: Option<String>,
+        #[arg(long)]
+        format: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 1200)]
+        max_chars: usize,
+    },
+    /// Update book title or comment/synopsis (write-safety fenced: dry-run unless `--confirm-write`).
+    BookUpdate {
+        #[arg(long)]
+        book_id: i64,
+        #[arg(long)]
+        library: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long, default_value_t = false)]
+        confirm_write: bool,
+    },
     /// Search inside book full-text content (`full-text-search.db`) with snippet extraction.
     #[command(visible_alias = "fts")]
     SearchFulltext {
@@ -112,6 +148,14 @@ enum Sub {
         library: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Search across all discovered Calibre libraries on disk simultaneously.
+    #[command(visible_alias = "search-all")]
+    SearchAllLibraries {
+        #[arg(long)]
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit_per_library: usize,
     },
     /// Group books by primary tag shelf (`bookcase_catalog`).
     Bookcase {
@@ -158,6 +202,18 @@ enum Sub {
     Health {
         #[arg(long)]
         library: Option<String>,
+    },
+    /// Language, publisher, publication decade, and rating distribution statistics.
+    ReadingStats {
+        #[arg(long)]
+        library: Option<String>,
+    },
+    /// Ranked unread/priority reading queue (top-rated and series-opener books with EPUB/PDF).
+    UnreadPriority {
+        #[arg(long)]
+        library: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
     /// Speak text aloud via fleet `speech-mcp` (`:10909`).
     Speak {
@@ -212,7 +268,7 @@ fn i64_arg(args: &Value, key: &str) -> Option<i64> {
     })
 }
 
-/// Complete MCP tool catalog (17 canonical ArtCraft tools + 12 primary legacy portmanteau aliases).
+/// Complete MCP tool catalog (23 canonical ArtCraft tools).
 pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
@@ -270,6 +326,48 @@ pub fn tools_list() -> Vec<Value> {
             }
         }),
         json!({
+            "name": CMD_BOOK_COVER,
+            "description": "Inspect cover.jpg metadata and byte size for a book ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string" },
+                    "book_id": { "type": "integer" }
+                },
+                "required": ["book_id"]
+            }
+        }),
+        json!({
+            "name": CMD_BOOK_EXCERPT,
+            "description": "Read a character-safe excerpt of a book's text from full-text-search.db:books_text (or synopsis fallback).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string" },
+                    "book_id": { "type": "integer" },
+                    "format": { "type": "string" },
+                    "offset_chars": { "type": "integer", "default": 0 },
+                    "max_chars": { "type": "integer", "default": 1200 }
+                },
+                "required": ["book_id"]
+            }
+        }),
+        json!({
+            "name": CMD_BOOK_UPDATE,
+            "description": "Update a book's title or comment/synopsis with write-safety fence (dry-run preview unless confirm_write=true).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string" },
+                    "book_id": { "type": "integer" },
+                    "new_title": { "type": "string" },
+                    "new_comment_html": { "type": "string" },
+                    "confirm_write": { "type": "boolean", "default": false }
+                },
+                "required": ["book_id"]
+            }
+        }),
+        json!({
             "name": CMD_SEARCH_FULLTEXT,
             "description": "Search inside full book text using Calibre's full-text-search.db (books_text) with context snippets.",
             "inputSchema": {
@@ -278,6 +376,18 @@ pub fn tools_list() -> Vec<Value> {
                     "library": { "type": "string" },
                     "query": { "type": "string" },
                     "limit": { "type": "integer", "default": 25 }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": CMD_SEARCH_ALL_LIBRARIES,
+            "description": "Federated search across all discovered Calibre libraries on disk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit_per_library": { "type": "integer", "default": 10 }
                 },
                 "required": ["query"]
             }
@@ -347,6 +457,27 @@ pub fn tools_list() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "library": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": CMD_READING_STATS,
+            "description": "Get language distribution, top publishers, publication decades, and rating breakdown for a Calibre library.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": CMD_UNREAD_PRIORITY,
+            "description": "Get a ranked priority reading queue (top-rated and series-opener books with readable formats).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string" },
+                    "limit": { "type": "integer", "default": 20 }
                 }
             }
         }),
@@ -447,6 +578,14 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
 
         "manage_libraries" | "manage_library_operations" => match op.as_str() {
             "stats" | "statistics" => Command::LibraryStats { library: lib },
+            "search" | "cross_search" => {
+                let query = str_arg(args, "query")
+                    .ok_or_else(|| "missing required parameter 'query'".to_string())?;
+                Command::SearchAllLibraries {
+                    query,
+                    limit_per_library: usize_arg(args, "limit", 10),
+                }
+            }
             _ => Command::LibrariesList {
                 include_counts: true,
             },
@@ -461,7 +600,6 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         | "query_books"
         | "search_books_helper"
         | "list_books_helper"
-        | "cross_library_search_helper"
         | "calibre_metadata_search" => Command::QueryBooks(BookQueryParams {
             library: lib,
             query: str_arg(args, "query")
@@ -474,6 +612,18 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             limit: Some(usize_arg(args, "limit", 50)),
             offset: Some(usize_arg(args, "offset", 0)),
         }),
+
+        CMD_SEARCH_ALL_LIBRARIES
+        | "calibre_search_all_libraries"
+        | "cross_library_search_helper" => {
+            let query = str_arg(args, "query")
+                .or_else(|| str_arg(args, "search_text"))
+                .ok_or_else(|| "missing required parameter 'query'".to_string())?;
+            Command::SearchAllLibraries {
+                query,
+                limit_per_library: usize_arg(args, "limit_per_library", 10),
+            }
+        }
 
         "get_books_by_author_helper" => Command::QueryBooks(BookQueryParams {
             library: lib,
@@ -489,17 +639,89 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             ..Default::default()
         }),
 
+        CMD_BOOK_COVER | "calibre_book_cover" => {
+            if let Some(book_id) = i64_arg(args, "book_id").or_else(|| i64_arg(args, "id")) {
+                Command::BookCover {
+                    library: lib,
+                    book_id,
+                }
+            } else {
+                return Err("missing required integer parameter 'book_id'".to_string());
+            }
+        }
+
+        CMD_BOOK_EXCERPT | "calibre_book_excerpt" | "inspect_contents" | "manage_viewer" => {
+            if let Some(book_id) = i64_arg(args, "book_id").or_else(|| i64_arg(args, "id")) {
+                Command::BookExcerpt {
+                    library: lib,
+                    book_id,
+                    format: str_arg(args, "format"),
+                    offset_chars: usize_arg(args, "offset_chars", 0),
+                    max_chars: usize_arg(args, "max_chars", 1200),
+                }
+            } else {
+                return Err("missing required integer parameter 'book_id'".to_string());
+            }
+        }
+
+        CMD_BOOK_UPDATE | "calibre_book_update" => {
+            if let Some(book_id) = i64_arg(args, "book_id").or_else(|| i64_arg(args, "id")) {
+                let confirm_write = args
+                    .get("confirm_write")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                Command::BookUpdate {
+                    library: lib,
+                    book_id,
+                    new_title: str_arg(args, "new_title").or_else(|| str_arg(args, "title")),
+                    new_comment_html: str_arg(args, "new_comment_html")
+                        .or_else(|| str_arg(args, "comment"))
+                        .or_else(|| str_arg(args, "description")),
+                    confirm_write,
+                }
+            } else {
+                return Err("missing required integer parameter 'book_id'".to_string());
+            }
+        }
+
+        "manage_comments"
+        | "manage_descriptions"
+        | "manage_metadata"
+        | "manage_extended_metadata" => {
+            if let Some(book_id) = i64_arg(args, "book_id").or_else(|| i64_arg(args, "id")) {
+                let new_title = str_arg(args, "new_title").or_else(|| str_arg(args, "title"));
+                let new_comment = str_arg(args, "new_comment_html")
+                    .or_else(|| str_arg(args, "comment"))
+                    .or_else(|| str_arg(args, "text"))
+                    .or_else(|| str_arg(args, "description"));
+                if op == "update" || op == "set" || new_title.is_some() || new_comment.is_some() {
+                    let confirm_write = args
+                        .get("confirm_write")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    Command::BookUpdate {
+                        library: lib,
+                        book_id,
+                        new_title,
+                        new_comment_html: new_comment,
+                        confirm_write,
+                    }
+                } else {
+                    Command::BookGet {
+                        library: lib,
+                        book_id,
+                    }
+                }
+            } else {
+                return Err("missing required integer parameter 'book_id'".to_string());
+            }
+        }
+
         CMD_BOOK_GET
         | "calibre_book_get"
         | "get_book_helper"
-        | "inspect_contents"
         | "manage_files"
         | "export_books"
-        | "manage_viewer"
-        | "manage_comments"
-        | "manage_descriptions"
-        | "manage_metadata"
-        | "manage_extended_metadata"
         | "show_book_prefab_card" => {
             if let Some(book_id) = i64_arg(args, "book_id").or_else(|| i64_arg(args, "id")) {
                 Command::BookGet {
@@ -593,13 +815,22 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             }
         }
 
+        CMD_READING_STATS | "calibre_reading_stats" | "reading_statistics" => {
+            Command::ReadingStats { library: lib }
+        }
+
+        CMD_UNREAD_PRIORITY | "calibre_unread_priority" | "unread_priority_list" => {
+            Command::UnreadPriority {
+                library: lib,
+                limit: usize_arg(args, "limit", 20),
+            }
+        }
+
         CMD_LIBRARY_HEALTH
         | "calibre_library_health"
         | "analyze_library_health"
         | "analyze_library"
         | "manage_analysis"
-        | "reading_statistics"
-        | "unread_priority_list"
         | "calibre_metadata_export_json"
         | "manage_bulk_operations"
         | "manage_content_sync"
@@ -803,6 +1034,33 @@ async fn main() {
             offset: Some(offset),
         }),
         Sub::BookGet { book_id, library } => Command::BookGet { library, book_id },
+        Sub::BookCover { book_id, library } => Command::BookCover { library, book_id },
+        Sub::BookExcerpt {
+            book_id,
+            library,
+            format,
+            offset,
+            max_chars,
+        } => Command::BookExcerpt {
+            library,
+            book_id,
+            format,
+            offset_chars: offset,
+            max_chars,
+        },
+        Sub::BookUpdate {
+            book_id,
+            library,
+            title,
+            comment,
+            confirm_write,
+        } => Command::BookUpdate {
+            library,
+            book_id,
+            new_title: title,
+            new_comment_html: comment,
+            confirm_write,
+        },
         Sub::SearchFulltext {
             query,
             library,
@@ -811,6 +1069,13 @@ async fn main() {
             library,
             query,
             limit,
+        },
+        Sub::SearchAllLibraries {
+            query,
+            limit_per_library,
+        } => Command::SearchAllLibraries {
+            query,
+            limit_per_library,
         },
         Sub::Bookcase { library, limit } => Command::BookcaseCatalog { library, limit },
         Sub::Authors {
@@ -842,6 +1107,8 @@ async fn main() {
         },
         Sub::Duplicates { library, limit } => Command::FindDuplicates { library, limit },
         Sub::Health { library } => Command::LibraryHealth { library },
+        Sub::ReadingStats { library } => Command::ReadingStats { library },
+        Sub::UnreadPriority { library, limit } => Command::UnreadPriority { library, limit },
         Sub::Speak { text, voice, url } => Command::BridgeSpeak { text, voice, url },
         Sub::Chat {
             prompt,
@@ -880,9 +1147,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_lists_17_tools() {
+    fn catalog_lists_23_tools() {
         let tools = tools_list();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 23);
     }
 
     #[tokio::test]
@@ -908,6 +1175,16 @@ mod tests {
         if let Ok(v) = q {
             assert_eq!(v["count"], 2);
         }
+
+        let ex = call_tool(
+            "inspect_contents",
+            &json!({"library": "demo", "book_id": 1}),
+        )
+        .await;
+        assert!(ex.is_ok());
+
+        let rs = call_tool("reading_statistics", &json!({"library": "demo"})).await;
+        assert!(rs.is_ok());
     }
 
     #[tokio::test]

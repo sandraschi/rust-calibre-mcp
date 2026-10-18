@@ -3,7 +3,7 @@
 
 use crate::error::DeviceError;
 use crate::import::{discover_libraries, DiscoveredLibrary};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -1343,6 +1343,608 @@ pub fn bookcase_catalog(library: Option<&str>, limit: usize) -> Result<Value, De
     }))
 }
 
+/// 11. Load book cover image bytes (`cover.jpg`) from disk for L3 `egui` texture rendering or MCP export.
+pub fn book_cover_bytes(
+    library: Option<&str>,
+    book_id: i64,
+) -> Result<(Option<Vec<u8>>, Value), DeviceError> {
+    if book_id <= 0 {
+        return Err(DeviceError::InvalidInput(format!(
+            "book_id must be positive, got {book_id}"
+        )));
+    }
+    match resolve_target_library(library)? {
+        ResolvedLibrary::Demo => {
+            let b = demo_books()
+                .into_iter()
+                .find(|x| x.id == book_id)
+                .ok_or_else(|| {
+                    DeviceError::InvalidInput(format!(
+                        "book_id {book_id} not found in Demo library"
+                    ))
+                })?;
+            Ok((
+                None,
+                json!({
+                    "mode": "demo",
+                    "library_name": "Demo-Library",
+                    "book_id": b.id,
+                    "title": b.title,
+                    "has_cover": b.has_cover,
+                    "bytes": 0,
+                }),
+            ))
+        }
+        ResolvedLibrary::Live(lib) => {
+            let conn = open_readonly_sqlite(Path::new(&lib.metadata_db))?;
+            let row: Option<(String, String, i64)> = conn
+                .query_row(
+                    "SELECT title, COALESCE(path, ''), COALESCE(has_cover, 0) FROM books WHERE id = ?1",
+                    [book_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| DeviceError::Protocol(format!("SQLite book_cover query failed: {e}")))?;
+            let Some((title, rel_path, has_cover)) = row else {
+                return Err(DeviceError::InvalidInput(format!(
+                    "book_id {book_id} not found in library '{}'",
+                    lib.name
+                )));
+            };
+            let cover_path = Path::new(&lib.path).join(&rel_path).join("cover.jpg");
+            if has_cover != 0 && cover_path.is_file() {
+                if let Ok(bytes) = std::fs::read(&cover_path) {
+                    let len = bytes.len();
+                    return Ok((
+                        Some(bytes),
+                        json!({
+                            "mode": "live",
+                            "library_name": lib.name,
+                            "book_id": book_id,
+                            "title": title,
+                            "has_cover": true,
+                            "cover_path": cover_path.to_string_lossy(),
+                            "bytes": len,
+                        }),
+                    ));
+                }
+            }
+            Ok((
+                None,
+                json!({
+                    "mode": "live",
+                    "library_name": lib.name,
+                    "book_id": book_id,
+                    "title": title,
+                    "has_cover": false,
+                    "cover_path": cover_path.to_string_lossy(),
+                    "bytes": 0,
+                }),
+            ))
+        }
+    }
+}
+
+/// 12. Read a character-safe excerpt of a book's full text from `full-text-search.db:books_text`
+///     (with automatic fallback to `metadata.db:comments` if full-text index is not built).
+pub fn book_read_excerpt(
+    library: Option<&str>,
+    book_id: i64,
+    format: Option<&str>,
+    offset_chars: usize,
+    max_chars: usize,
+) -> Result<Value, DeviceError> {
+    if book_id <= 0 {
+        return Err(DeviceError::InvalidInput(format!(
+            "book_id must be positive, got {book_id}"
+        )));
+    }
+    let max_chars = max_chars.clamp(100, 12_000);
+    match resolve_target_library(library)? {
+        ResolvedLibrary::Demo => {
+            let b = demo_books()
+                .into_iter()
+                .find(|x| x.id == book_id)
+                .ok_or_else(|| {
+                    DeviceError::InvalidInput(format!(
+                        "book_id {book_id} not found in Demo library"
+                    ))
+                })?;
+            let raw = b.summary_snippet.unwrap_or_default();
+            let text: String = raw.chars().skip(offset_chars).take(max_chars).collect();
+            Ok(json!({
+                "mode": "demo",
+                "library_name": "Demo-Library",
+                "book_id": b.id,
+                "title": b.title,
+                "format": format.unwrap_or("EPUB"),
+                "source": "demo_synopsis",
+                "offset_chars": offset_chars,
+                "returned_chars": text.chars().count(),
+                "total_chars": raw.chars().count(),
+                "text": text,
+                "excerpt": text,
+            }))
+        }
+        ResolvedLibrary::Live(lib) => {
+            let meta_conn = open_readonly_sqlite(Path::new(&lib.metadata_db))?;
+            let title: String = meta_conn
+                .query_row("SELECT title FROM books WHERE id = ?1", [book_id], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(|e| DeviceError::Protocol(format!("SQLite book lookup failed: {e}")))?
+                .ok_or_else(|| {
+                    DeviceError::InvalidInput(format!(
+                        "book_id {book_id} not found in library '{}'",
+                        lib.name
+                    ))
+                })?;
+
+            if let Some(fts_path) = &lib.fts_db {
+                if let Ok(fts_conn) = open_readonly_sqlite(Path::new(fts_path)) {
+                    let row: Option<(String, String)> =
+                        if let Some(fmt) = format.map(str::trim).filter(|s| !s.is_empty()) {
+                            fts_conn
+                            .query_row(
+                                "SELECT COALESCE(format, 'UNKNOWN'), COALESCE(searchable_text, '')
+                                     FROM books_text
+                                     WHERE book = ?1 AND UPPER(format) = UPPER(?2)
+                                     LIMIT 1",
+                                params![book_id, fmt],
+                                |r| Ok((r.get(0)?, r.get(1)?)),
+                            )
+                            .optional()
+                            .unwrap_or(None)
+                        } else {
+                            fts_conn
+                            .query_row(
+                                "SELECT COALESCE(format, 'UNKNOWN'), COALESCE(searchable_text, '')
+                                     FROM books_text
+                                     WHERE book = ?1
+                                     LIMIT 1",
+                                [book_id],
+                                |r| Ok((r.get(0)?, r.get(1)?)),
+                            )
+                            .optional()
+                            .unwrap_or(None)
+                        };
+
+                    if let Some((fmt, full_text)) = row {
+                        let total_chars = full_text.chars().count();
+                        let excerpt: String = full_text
+                            .chars()
+                            .skip(offset_chars)
+                            .take(max_chars)
+                            .collect();
+                        return Ok(json!({
+                            "mode": "live",
+                            "library_name": lib.name,
+                            "book_id": book_id,
+                            "title": title,
+                            "format": fmt,
+                            "source": "full-text-search.db:books_text",
+                            "offset_chars": offset_chars,
+                            "returned_chars": excerpt.chars().count(),
+                            "total_chars": total_chars,
+                            "text": excerpt,
+                            "excerpt": excerpt,
+                        }));
+                    }
+                }
+            }
+
+            // Fallback to comments/synopsis in metadata.db
+            let raw_comment: String = meta_conn
+                .query_row(
+                    "SELECT COALESCE(text, '') FROM comments WHERE book = ?1",
+                    [book_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or_default();
+            let clean = strip_html_tags(&raw_comment);
+            let total_chars = clean.chars().count();
+            let excerpt: String = clean.chars().skip(offset_chars).take(max_chars).collect();
+            Ok(json!({
+                "mode": "live",
+                "library_name": lib.name,
+                "book_id": book_id,
+                "title": title,
+                "format": "SYNOPSIS",
+                "source": "metadata.db:comments",
+                "offset_chars": offset_chars,
+                "returned_chars": excerpt.chars().count(),
+                "total_chars": total_chars,
+                "text": excerpt,
+                "excerpt": excerpt,
+            }))
+        }
+    }
+}
+
+/// 13. Reading & Catalog Statistics (`reading_statistics`: languages, publishers, decades, ratings).
+pub fn reading_statistics(library: Option<&str>) -> Result<Value, DeviceError> {
+    match resolve_target_library(library)? {
+        ResolvedLibrary::Demo => Ok(json!({
+            "mode": "demo",
+            "library_name": "Demo-Library",
+            "languages": [{"lang_code": "eng", "book_count": 6}],
+            "top_publishers": [
+                {"publisher": "No Starch Press", "book_count": 1},
+                {"publisher": "O'Reilly Media", "book_count": 1},
+                {"publisher": "Addison-Wesley", "book_count": 1}
+            ],
+            "decades": [
+                {"decade": "1960s", "book_count": 2},
+                {"decade": "1970s", "book_count": 1},
+                {"decade": "1980s", "book_count": 1},
+                {"decade": "2010s", "book_count": 1},
+                {"decade": "2020s", "book_count": 1}
+            ],
+            "ratings": [
+                {"stars": 5.0, "book_count": 4},
+                {"stars": 4.5, "book_count": 1},
+                {"stars": 4.0, "book_count": 1}
+            ],
+        })),
+        ResolvedLibrary::Live(lib) => {
+            let conn = open_readonly_sqlite(Path::new(&lib.metadata_db))?;
+
+            let mut languages = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT l.lang_code, COUNT(bal.book) AS cnt
+                 FROM languages l
+                 JOIN books_languages_link bal ON bal.lang_code = l.id
+                 GROUP BY l.id
+                 ORDER BY cnt DESC
+                 LIMIT 15",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok(json!({
+                        "lang_code": r.get::<_, String>(0)?,
+                        "book_count": r.get::<_, i64>(1)?,
+                    }))
+                }) {
+                    for item in rows.flatten() {
+                        languages.push(item);
+                    }
+                }
+            }
+
+            let mut publishers = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT p.name, COUNT(bpl.book) AS cnt
+                 FROM publishers p
+                 JOIN books_publishers_link bpl ON bpl.publisher = p.id
+                 GROUP BY p.id
+                 ORDER BY cnt DESC, p.name COLLATE NOCASE ASC
+                 LIMIT 20",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok(json!({
+                        "publisher": r.get::<_, String>(0)?,
+                        "book_count": r.get::<_, i64>(1)?,
+                    }))
+                }) {
+                    for item in rows.flatten() {
+                        publishers.push(item);
+                    }
+                }
+            }
+
+            let mut decades = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT substr(CAST(pubdate AS TEXT), 1, 3) || '0s' AS decade, COUNT(*) AS cnt
+                 FROM books
+                 WHERE pubdate IS NOT NULL
+                   AND substr(CAST(pubdate AS TEXT), 1, 4) >= '1800'
+                   AND substr(CAST(pubdate AS TEXT), 1, 4) <= '2035'
+                   AND substr(CAST(pubdate AS TEXT), 1, 4) != '0101'
+                 GROUP BY decade
+                 ORDER BY decade DESC
+                 LIMIT 15",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok(json!({
+                        "decade": r.get::<_, String>(0)?,
+                        "book_count": r.get::<_, i64>(1)?,
+                    }))
+                }) {
+                    for item in rows.flatten() {
+                        decades.push(item);
+                    }
+                }
+            }
+
+            let mut ratings = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT r.rating, COUNT(brl.book) AS cnt
+                 FROM ratings r
+                 JOIN books_ratings_link brl ON brl.rating = r.id
+                 WHERE r.rating > 0
+                 GROUP BY r.rating
+                 ORDER BY r.rating DESC",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    let raw: i64 = r.get(0)?;
+                    let cnt: i64 = r.get(1)?;
+                    Ok(json!({
+                        "stars": (raw as f64) / 2.0,
+                        "book_count": cnt,
+                    }))
+                }) {
+                    for item in rows.flatten() {
+                        ratings.push(item);
+                    }
+                }
+            }
+
+            Ok(json!({
+                "mode": "live",
+                "library_name": lib.name,
+                "languages": languages,
+                "top_publishers": publishers,
+                "decades": decades,
+                "ratings": ratings,
+            }))
+        }
+    }
+}
+
+/// 14. Unread / Priority Reading Queue (`unread_priority_list`): ranks top-rated and series-opener books.
+pub fn unread_priority_list(library: Option<&str>, limit: usize) -> Result<Value, DeviceError> {
+    let limit = limit.clamp(1, 100);
+    match resolve_target_library(library)? {
+        ResolvedLibrary::Demo => {
+            let items: Vec<Value> = demo_books()
+                .into_iter()
+                .take(limit)
+                .map(|b| {
+                    json!({
+                        "id": b.id,
+                        "title": b.title,
+                        "authors": b.authors,
+                        "formats": b.formats,
+                        "series": b.series,
+                        "series_index": b.series_index,
+                        "rating": b.rating.map(|r| (r as f64) / 2.0),
+                        "priority_score": 95,
+                        "reason": "Top-rated · Series #1 · EPUB ready",
+                        "summary_snippet": b.summary_snippet,
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "mode": "demo",
+                "library_name": "Demo-Library",
+                "count": items.len(),
+                "priority_queue": items,
+                "priority_books": items,
+            }))
+        }
+        ResolvedLibrary::Live(lib) => {
+            let conn = open_readonly_sqlite(Path::new(&lib.metadata_db))?;
+            let sql = "
+                SELECT
+                    b.id,
+                    b.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, '|') FROM authors a JOIN books_authors_link bal ON bal.author = a.id WHERE bal.book = b.id), ''),
+                    COALESCE((SELECT GROUP_CONCAT(d.format, '|') FROM data d WHERE d.book = b.id), ''),
+                    (SELECT s.name FROM series s JOIN books_series_link bsl ON bsl.series = s.id WHERE bsl.book = b.id LIMIT 1),
+                    b.series_index,
+                    (SELECT r.rating FROM ratings r JOIN books_ratings_link brl ON brl.rating = r.id WHERE brl.book = b.id LIMIT 1),
+                    COALESCE((SELECT substr(c.text, 1, 280) FROM comments c WHERE c.book = b.id LIMIT 1), '')
+                FROM books b
+                WHERE EXISTS (SELECT 1 FROM data d WHERE d.book = b.id AND d.format IN ('EPUB', 'PDF', 'AZW3', 'MOBI'))
+                ORDER BY
+                    COALESCE((SELECT r.rating FROM ratings r JOIN books_ratings_link brl ON brl.rating = r.id WHERE brl.book = b.id LIMIT 1), 0) DESC,
+                    CASE WHEN b.series_index = 1.0 THEN 1 ELSE 0 END DESC,
+                    b.timestamp DESC
+                LIMIT ?1
+            ";
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| DeviceError::Protocol(format!("SQLite priority prepare: {e}")))?;
+            let rows = stmt
+                .query_map([limit as i64], |r| {
+                    let rating_raw: Option<i64> = r.get(6)?;
+                    let series_opt: Option<String> = r.get(4)?;
+                    let series_idx: Option<f64> = r.get(5)?;
+                    let formats = split_pipe_list(r.get::<_, Option<String>>(3)?);
+                    let mut score: i64 = 50;
+                    let mut reasons = Vec::new();
+                    if let Some(rt) = rating_raw {
+                        score += rt * 3;
+                        reasons.push(format!("{:.1} stars", (rt as f64) / 2.0));
+                    }
+                    if series_opt.is_some() && (series_idx.unwrap_or(0.0) - 1.0).abs() < 0.01 {
+                        score += 15;
+                        reasons.push("Series #1".to_string());
+                    }
+                    if !formats.is_empty() {
+                        reasons.push(formats.join("/"));
+                    }
+                    Ok(json!({
+                        "id": r.get::<_, i64>(0)?,
+                        "title": r.get::<_, String>(1)?,
+                        "authors": split_pipe_list(r.get::<_, Option<String>>(2)?),
+                        "formats": formats,
+                        "series": series_opt,
+                        "series_index": series_idx,
+                        "rating": rating_raw.map(|v| (v as f64) / 2.0),
+                        "priority_score": score,
+                        "reason": reasons.join(" · "),
+                        "summary_snippet": truncate_chars(&strip_html_tags(&r.get::<_, String>(7)?), 180),
+                    }))
+                })
+                .map_err(|e| DeviceError::Protocol(format!("SQLite priority query: {e}")))?;
+            let mut priority_books = Vec::new();
+            for item in rows.flatten() {
+                priority_books.push(item);
+            }
+            Ok(json!({
+                "mode": "live",
+                "library_name": lib.name,
+                "count": priority_books.len(),
+                "priority_queue": priority_books,
+                "priority_books": priority_books,
+            }))
+        }
+    }
+}
+
+/// 15. Cross-Library Federated Search (`calibre.search_all_libraries`): searches across all discovered Calibre libraries.
+pub fn search_all_libraries(query: &str, limit_per_library: usize) -> Result<Value, DeviceError> {
+    let clean_q = query.trim();
+    if clean_q.is_empty() {
+        return Err(DeviceError::InvalidInput(
+            "search_all_libraries requires a non-empty query string".to_string(),
+        ));
+    }
+    let limit_per_library = limit_per_library.clamp(1, 50);
+    let discovered = discover_libraries();
+    if discovered.is_empty() {
+        let demo_res = query_books(&BookQueryParams {
+            library: Some("demo".to_string()),
+            query: Some(clean_q.to_string()),
+            limit: Some(limit_per_library),
+            ..Default::default()
+        })?;
+        let books = demo_res
+            .get("books")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        return Ok(json!({
+            "mode": "demo",
+            "query": clean_q,
+            "libraries_searched": 1,
+            "libraries_with_hits": usize::from(!books.is_empty()),
+            "total_hits": books.len(),
+            "count": books.len(),
+            "books": books,
+            "results_by_library": [demo_res],
+        }));
+    }
+
+    let mut results_by_library = Vec::new();
+    let mut flat_books = Vec::new();
+    let mut total_hits: usize = 0;
+    for lib in &discovered {
+        if let Ok(res) = query_books(&BookQueryParams {
+            library: Some(lib.name.clone()),
+            query: Some(clean_q.to_string()),
+            limit: Some(limit_per_library),
+            ..Default::default()
+        }) {
+            let count = res.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if count > 0 {
+                total_hits += count;
+                if let Some(arr) = res.get("books").and_then(Value::as_array) {
+                    for b in arr {
+                        flat_books.push(b.clone());
+                    }
+                }
+                results_by_library.push(json!({
+                    "library_name": lib.name,
+                    "count": count,
+                    "books": res.get("books"),
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "mode": "live",
+        "query": clean_q,
+        "libraries_searched": discovered.len(),
+        "libraries_with_hits": results_by_library.len(),
+        "total_hits": total_hits,
+        "count": flat_books.len(),
+        "books": flat_books,
+        "results_by_library": results_by_library,
+    }))
+}
+
+/// 16. Write-Safety Fenced Metadata Update (`manage_comments` / `manage_metadata`).
+///     Default `confirm_write = false` returns a read-only dry-run preview without opening SQLite in write mode.
+pub fn book_update_metadata(
+    library: Option<&str>,
+    book_id: i64,
+    new_title: Option<&str>,
+    new_comment_html: Option<&str>,
+    confirm_write: bool,
+) -> Result<Value, DeviceError> {
+    if book_id <= 0 {
+        return Err(DeviceError::InvalidInput(format!(
+            "book_id must be positive, got {book_id}"
+        )));
+    }
+    let clean_title = new_title.map(str::trim).filter(|s| !s.is_empty());
+    let clean_comment = new_comment_html.map(str::trim).filter(|s| !s.is_empty());
+    if clean_title.is_none() && clean_comment.is_none() {
+        return Err(DeviceError::InvalidInput(
+            "book_update_metadata requires at least one of new_title or new_comment_html"
+                .to_string(),
+        ));
+    }
+
+    let current = book_get(library, book_id)?;
+    if !confirm_write || current.get("mode").and_then(Value::as_str) == Some("demo") {
+        return Ok(json!({
+            "dry_run": true,
+            "committed": false,
+            "note": "Write-safety fence active (confirm_write=false or Demo library). Pass confirm_write=true on a live library to commit.",
+            "book_id": book_id,
+            "library_name": current.get("library_name"),
+            "current_title": current.get("book").and_then(|b| b.get("title")),
+            "proposed_title": clean_title.or_else(|| current.get("book").and_then(|b| b.get("title")).and_then(Value::as_str)),
+            "proposed_comment_html": clean_comment,
+        }));
+    }
+
+    let ResolvedLibrary::Live(lib) = resolve_target_library(library)? else {
+        return Err(DeviceError::Unsupported(
+            "cannot mutate Demo library".to_string(),
+        ));
+    };
+
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut conn = Connection::open_with_flags(Path::new(&lib.metadata_db), flags)
+        .map_err(|e| DeviceError::Protocol(format!("SQLite write open failed: {e}")))?;
+    let _ = conn.busy_timeout(Duration::from_millis(5000));
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| DeviceError::Protocol(format!("SQLite transaction start failed: {e}")))?;
+    if let Some(t) = clean_title {
+        tx.execute(
+            "UPDATE books SET title = ?1, sort = ?1, last_modified = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![t, book_id],
+        )
+        .map_err(|e| DeviceError::Protocol(format!("SQLite title update failed: {e}")))?;
+    }
+    if let Some(c) = clean_comment {
+        tx.execute(
+            "INSERT INTO comments (book, text) VALUES (?1, ?2)
+             ON CONFLICT(book) DO UPDATE SET text = excluded.text",
+            params![book_id, c],
+        )
+        .map_err(|e| DeviceError::Protocol(format!("SQLite comment update failed: {e}")))?;
+    }
+    tx.commit()
+        .map_err(|e| DeviceError::Protocol(format!("SQLite commit failed: {e}")))?;
+
+    Ok(json!({
+        "dry_run": false,
+        "committed": true,
+        "book_id": book_id,
+        "library_name": lib.name,
+        "updated_title": clean_title,
+        "updated_comment": clean_comment.is_some(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1369,5 +1971,21 @@ mod tests {
         assert!(book.is_ok());
         let health = library_health(Some("demo"));
         assert!(health.is_ok());
+    }
+
+    #[test]
+    fn demo_excerpt_reading_stats_and_dry_run_update_succeed() {
+        let ex = book_read_excerpt(Some("demo"), 1, Some("EPUB"), 0, 200);
+        assert!(ex.is_ok());
+        let rs = reading_statistics(Some("demo"));
+        assert!(rs.is_ok());
+        let up = unread_priority_list(Some("demo"), 5);
+        assert!(up.is_ok());
+        let dry = book_update_metadata(Some("demo"), 1, Some("New Title"), None, false);
+        assert!(dry.is_ok());
+        if let Ok(v) = dry {
+            assert_eq!(v["dry_run"], true);
+            assert_eq!(v["committed"], false);
+        }
     }
 }

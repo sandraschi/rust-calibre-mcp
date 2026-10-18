@@ -25,20 +25,26 @@ pub const CMD_LIBRARIES_LIST: &str = "calibre.libraries_list";
 pub const CMD_LIBRARY_STATS: &str = "calibre.library_stats";
 pub const CMD_QUERY_BOOKS: &str = "calibre.query_books";
 pub const CMD_BOOK_GET: &str = "calibre.book_get";
+pub const CMD_BOOK_COVER: &str = "calibre.book_cover";
+pub const CMD_BOOK_EXCERPT: &str = "calibre.book_excerpt";
+pub const CMD_BOOK_UPDATE: &str = "calibre.book_update";
 pub const CMD_SEARCH_FULLTEXT: &str = "calibre.search_fulltext";
+pub const CMD_SEARCH_ALL_LIBRARIES: &str = "calibre.search_all_libraries";
 pub const CMD_BOOKCASE_CATALOG: &str = "calibre.bookcase_catalog";
 pub const CMD_AUTHORS_LIST: &str = "calibre.authors_list";
 pub const CMD_TAGS_LIST: &str = "calibre.tags_list";
 pub const CMD_SERIES_ANALYSIS: &str = "calibre.series_analysis";
 pub const CMD_FIND_DUPLICATES: &str = "calibre.find_duplicates";
 pub const CMD_LIBRARY_HEALTH: &str = "calibre.library_health";
+pub const CMD_READING_STATS: &str = "calibre.reading_stats";
+pub const CMD_UNREAD_PRIORITY: &str = "calibre.unread_priority";
 pub const CMD_BRIDGE_EVENT: &str = "bridge.event";
 pub const CMD_BRIDGE_SPEAK: &str = "bridge.speak";
 pub const CMD_BRIDGE_WEBHOOK: &str = "bridge.webhook";
 pub const CMD_LLM_CHAT: &str = "llm.chat";
 pub const CMD_LLM_MODELS: &str = "llm.models";
 
-/// Bounded command bus for `rust-calibre-mcp`.
+/// Bounded command bus for `rust-calibre-mcp` (23 canonical commands).
 #[derive(Debug, Clone)]
 pub enum Command {
     Status,
@@ -53,10 +59,32 @@ pub enum Command {
         library: Option<String>,
         book_id: i64,
     },
+    BookCover {
+        library: Option<String>,
+        book_id: i64,
+    },
+    BookExcerpt {
+        library: Option<String>,
+        book_id: i64,
+        format: Option<String>,
+        offset_chars: usize,
+        max_chars: usize,
+    },
+    BookUpdate {
+        library: Option<String>,
+        book_id: i64,
+        new_title: Option<String>,
+        new_comment_html: Option<String>,
+        confirm_write: bool,
+    },
     SearchFulltext {
         library: Option<String>,
         query: String,
         limit: usize,
+    },
+    SearchAllLibraries {
+        query: String,
+        limit_per_library: usize,
     },
     BookcaseCatalog {
         library: Option<String>,
@@ -83,6 +111,13 @@ pub enum Command {
     },
     LibraryHealth {
         library: Option<String>,
+    },
+    ReadingStats {
+        library: Option<String>,
+    },
+    UnreadPriority {
+        library: Option<String>,
+        limit: usize,
     },
     BridgeEvent {
         kind: String,
@@ -140,13 +175,19 @@ pub async fn dispatch(cmd: Command) -> Value {
                     CMD_LIBRARY_STATS,
                     CMD_QUERY_BOOKS,
                     CMD_BOOK_GET,
+                    CMD_BOOK_COVER,
+                    CMD_BOOK_EXCERPT,
+                    CMD_BOOK_UPDATE,
                     CMD_SEARCH_FULLTEXT,
+                    CMD_SEARCH_ALL_LIBRARIES,
                     CMD_BOOKCASE_CATALOG,
                     CMD_AUTHORS_LIST,
                     CMD_TAGS_LIST,
                     CMD_SERIES_ANALYSIS,
                     CMD_FIND_DUPLICATES,
                     CMD_LIBRARY_HEALTH,
+                    CMD_READING_STATS,
+                    CMD_UNREAD_PRIORITY,
                     CMD_BRIDGE_EVENT,
                     CMD_BRIDGE_SPEAK,
                     CMD_BRIDGE_WEBHOOK,
@@ -184,6 +225,57 @@ pub async fn dispatch(cmd: Command) -> Value {
                 .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
                 .and_then(|r| r),
         ),
+        Command::BookCover { library, book_id } => encode(
+            CMD_BOOK_COVER,
+            tokio::task::spawn_blocking(move || {
+                calibre_db::book_cover_bytes(library.as_deref(), book_id).map(|(_, meta)| meta)
+            })
+            .await
+            .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
+            .and_then(|r| r),
+        ),
+        Command::BookExcerpt {
+            library,
+            book_id,
+            format,
+            offset_chars,
+            max_chars,
+        } => encode(
+            CMD_BOOK_EXCERPT,
+            tokio::task::spawn_blocking(move || {
+                calibre_db::book_read_excerpt(
+                    library.as_deref(),
+                    book_id,
+                    format.as_deref(),
+                    offset_chars,
+                    max_chars,
+                )
+            })
+            .await
+            .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
+            .and_then(|r| r),
+        ),
+        Command::BookUpdate {
+            library,
+            book_id,
+            new_title,
+            new_comment_html,
+            confirm_write,
+        } => encode(
+            CMD_BOOK_UPDATE,
+            tokio::task::spawn_blocking(move || {
+                calibre_db::book_update_metadata(
+                    library.as_deref(),
+                    book_id,
+                    new_title.as_deref(),
+                    new_comment_html.as_deref(),
+                    confirm_write,
+                )
+            })
+            .await
+            .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
+            .and_then(|r| r),
+        ),
         Command::SearchFulltext {
             library,
             query,
@@ -192,6 +284,18 @@ pub async fn dispatch(cmd: Command) -> Value {
             CMD_SEARCH_FULLTEXT,
             tokio::task::spawn_blocking(move || {
                 calibre_db::search_fulltext(library.as_deref(), &query, limit)
+            })
+            .await
+            .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
+            .and_then(|r| r),
+        ),
+        Command::SearchAllLibraries {
+            query,
+            limit_per_library,
+        } => encode(
+            CMD_SEARCH_ALL_LIBRARIES,
+            tokio::task::spawn_blocking(move || {
+                calibre_db::search_all_libraries(&query, limit_per_library)
             })
             .await
             .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
@@ -260,6 +364,22 @@ pub async fn dispatch(cmd: Command) -> Value {
                 .await
                 .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
                 .and_then(|r| r),
+        ),
+        Command::ReadingStats { library } => encode(
+            CMD_READING_STATS,
+            tokio::task::spawn_blocking(move || calibre_db::reading_statistics(library.as_deref()))
+                .await
+                .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
+                .and_then(|r| r),
+        ),
+        Command::UnreadPriority { library, limit } => encode(
+            CMD_UNREAD_PRIORITY,
+            tokio::task::spawn_blocking(move || {
+                calibre_db::unread_priority_list(library.as_deref(), limit)
+            })
+            .await
+            .map_err(|e| DeviceError::Protocol(format!("join error: {e}")))
+            .and_then(|r| r),
         ),
         Command::BridgeEvent {
             kind,
@@ -345,14 +465,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn status_lists_all_17_commands() {
+    async fn status_lists_all_23_commands() {
         let v = dispatch(Command::Status).await;
         let cmds = v
             .get("commands")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        assert_eq!(cmds.len(), 17);
+        assert_eq!(cmds.len(), 23);
     }
 
     #[tokio::test]
