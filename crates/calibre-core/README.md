@@ -1,6 +1,6 @@
 # `calibre-core` (L1 Pure-Rust Domain Engine)
 
-`calibre-core` is the L1 pure-Rust library crate for `rust-calibre-mcp`. It implements all 23 canonical commands (`ALL_COMMANDS`), SQLite read-only connection pooling (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` + `5000 ms` `busy_timeout`), multi-library discovery across `%APPDATA%\calibre\gui.json` and `global.py.json`, full-text search across `full-text-search.db` (`books_text` + `books_fts` FTS5), cover image loading, book excerpt pagination, reading statistics, unread priority queues, federated 11-library search, write-safety fenced metadata updates, fleet crossconnect (`speech-mcp` & `aiwatcher`), and local/cloud LLM chat (`gemma4:12b` default).
+`calibre-core` is the L1 pure-Rust library crate for `rust-calibre-mcp`. It implements all 23 canonical commands (`ALL_COMMANDS`), SQLite read-only connection pooling (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` + `5000 ms` `busy_timeout`), multi-library discovery across `%APPDATA%\calibre\gui.json` and `global.py.json`, full-text search across `full-text-search.db` (`books_text` + `books_fts` FTS5), cover image loading, book excerpt pagination, reading statistics, unread priority queues, federated multi-library search, write-safety fenced metadata updates, fleet crossconnect (`speech-mcp` & `aiwatcher`), and local/cloud LLM chat (`gemma4:12b` default).
 
 ## Modules
 
