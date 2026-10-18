@@ -46,10 +46,16 @@ pub enum Page {
 enum Job {
     Libraries(Value),
     Books(Value),
-    BookDetail(Value),
+    BookDetail {
+        detail: Value,
+        cover_jpeg: Option<Vec<u8>>,
+    },
+    BookExcerpt(Value),
     Fulltext(Value),
     Health(Value),
     Series(Value),
+    ReadingStats(Value),
+    UnreadPriority(Value),
     ChatReply(Value),
     StatusNote(String, Value),
     VaultLoaded(String, String),
@@ -69,9 +75,14 @@ pub struct CalibreApp {
     libraries_val: Value,
     books_val: Value,
     selected_book: Option<Value>,
+    cover_tex: Option<egui::TextureHandle>,
+    excerpt_val: Value,
+    excerpt_offset: usize,
     fulltext_val: Value,
     health_val: Value,
     series_val: Value,
+    reading_stats_val: Value,
+    priority_val: Value,
     last_raw: Value,
     // Search & filter inputs
     q_text: String,
@@ -246,9 +257,14 @@ impl CalibreApp {
             libraries_val: json!({}),
             books_val: json!({}),
             selected_book: None,
+            cover_tex: None,
+            excerpt_val: json!({}),
+            excerpt_offset: 0,
             fulltext_val: json!({}),
             health_val: json!({}),
             series_val: json!({}),
+            reading_stats_val: json!({}),
+            priority_val: json!({}),
             last_raw: json!({}),
             q_text: String::new(),
             q_author: String::new(),
@@ -337,18 +353,84 @@ impl CalibreApp {
         self.spawn(move || async move { Job::Books(dispatch(Command::QueryBooks(params)).await) });
     }
 
+    fn spawn_search_all_libraries(&mut self) {
+        let q = self.q_text.trim().to_string();
+        if q.is_empty() {
+            self.status_line = "Enter a search term to search across all 11 libraries.".to_string();
+            return;
+        }
+        self.status_line = format!("Searching all discovered libraries for '{q}'…");
+        self.spawn(move || async move {
+            let v = dispatch(Command::SearchAllLibraries {
+                query: q,
+                limit_per_library: 15,
+            })
+            .await;
+            let mut flattened = Vec::new();
+            if let Some(arr) = v.get("results_by_library").and_then(Value::as_array) {
+                for entry in arr {
+                    if let Some(books) = entry.get("books").and_then(Value::as_array) {
+                        for b in books {
+                            flattened.push(b.clone());
+                        }
+                    }
+                }
+            }
+            let total = flattened.len();
+            Job::Books(json!({
+                "mode": v.get("mode"),
+                "library_name": "All Libraries (Federated)",
+                "count": total,
+                "books": flattened,
+                "federated_summary": v,
+            }))
+        });
+    }
+
     fn spawn_book_detail(&mut self, book_id: i64) {
         let lib = if self.active_library.is_empty() {
             None
         } else {
             Some(self.active_library.clone())
         };
-        self.status_line = format!("Loading book #{book_id}…");
+        let lib_cover = lib.clone();
+        self.excerpt_val = json!({});
+        self.excerpt_offset = 0;
+        self.status_line = format!("Loading book #{book_id} + cover.jpg…");
         self.spawn(move || async move {
-            Job::BookDetail(
-                dispatch(Command::BookGet {
+            let detail = dispatch(Command::BookGet {
+                library: lib,
+                book_id,
+            })
+            .await;
+            let cover_jpeg = tokio::task::spawn_blocking(move || {
+                calibre_core::calibre_db::book_cover_bytes(lib_cover.as_deref(), book_id)
+                    .ok()
+                    .and_then(|(bytes, _)| bytes)
+            })
+            .await
+            .ok()
+            .flatten();
+            Job::BookDetail { detail, cover_jpeg }
+        });
+    }
+
+    fn spawn_book_excerpt(&mut self, book_id: i64, offset_chars: usize) {
+        let lib = if self.active_library.is_empty() {
+            None
+        } else {
+            Some(self.active_library.clone())
+        };
+        self.excerpt_offset = offset_chars;
+        self.status_line = format!("Reading excerpt for book #{book_id} (offset {offset_chars})…");
+        self.spawn(move || async move {
+            Job::BookExcerpt(
+                dispatch(Command::BookExcerpt {
                     library: lib,
                     book_id,
+                    format: None,
+                    offset_chars,
+                    max_chars: 1800,
                 })
                 .await,
             )
@@ -386,7 +468,10 @@ impl CalibreApp {
             Some(self.active_library.clone())
         };
         let lib2 = lib1.clone();
-        self.status_line = "Running library health & canon coverage audit…".to_string();
+        let lib3 = lib1.clone();
+        let lib4 = lib1.clone();
+        self.status_line =
+            "Running library health, reading stats & canon coverage audit…".to_string();
         self.spawn(move || async move {
             Job::Health(dispatch(Command::LibraryHealth { library: lib1 }).await)
         });
@@ -400,9 +485,21 @@ impl CalibreApp {
                 .await,
             )
         });
+        self.spawn(move || async move {
+            Job::ReadingStats(dispatch(Command::ReadingStats { library: lib3 }).await)
+        });
+        self.spawn(move || async move {
+            Job::UnreadPriority(
+                dispatch(Command::UnreadPriority {
+                    library: lib4,
+                    limit: 15,
+                })
+                .await,
+            )
+        });
     }
 
-    fn drain_jobs(&mut self) {
+    fn drain_jobs(&mut self, ctx: &egui::Context) {
         while let Ok(job) = self.rx.try_recv() {
             self.pending = self.pending.saturating_sub(1);
             match job {
@@ -430,10 +527,26 @@ impl CalibreApp {
                     self.last_raw = v.clone();
                     self.books_val = v;
                 }
-                Job::BookDetail(v) => {
+                Job::BookDetail { detail, cover_jpeg } => {
                     self.status_line = "Book details loaded".to_string();
+                    self.cover_tex = cover_jpeg.and_then(|bytes| {
+                        let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+                        let size = [decoded.width() as usize, decoded.height() as usize];
+                        let color_img =
+                            egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+                        Some(ctx.load_texture(
+                            "calibre-book-cover",
+                            color_img,
+                            egui::TextureOptions::LINEAR,
+                        ))
+                    });
+                    self.last_raw = detail.clone();
+                    self.selected_book = Some(detail);
+                }
+                Job::BookExcerpt(v) => {
+                    self.status_line = "Book excerpt loaded".to_string();
                     self.last_raw = v.clone();
-                    self.selected_book = Some(v);
+                    self.excerpt_val = v;
                 }
                 Job::Fulltext(v) => {
                     let count = v.get("count").and_then(Value::as_u64).unwrap_or(0);
@@ -448,6 +561,12 @@ impl CalibreApp {
                 }
                 Job::Series(v) => {
                     self.series_val = v;
+                }
+                Job::ReadingStats(v) => {
+                    self.reading_stats_val = v;
+                }
+                Job::UnreadPriority(v) => {
+                    self.priority_val = v;
                 }
                 Job::ChatReply(v) => {
                     if let Some(r) = v.get("reply").and_then(Value::as_str) {
@@ -624,6 +743,9 @@ impl CalibreApp {
             {
                 self.spawn_query_books();
             }
+            if ui.button("Search All 11 Libraries").clicked() {
+                self.spawn_search_all_libraries();
+            }
             if ui.button("Clear").clicked() {
                 self.q_text.clear();
                 self.q_author.clear();
@@ -708,6 +830,7 @@ impl CalibreApp {
             cols[1].add_space(4.0);
             if let Some(detail) = self.selected_book.clone() {
                 let book = detail.get("book").cloned().unwrap_or_else(|| json!({}));
+                let book_id = book.get("id").and_then(Value::as_i64).unwrap_or(0);
                 let title = book
                     .get("title")
                     .and_then(Value::as_str)
@@ -718,43 +841,105 @@ impl CalibreApp {
                     .unwrap_or("No synopsis recorded in metadata.db.");
 
                 card_frame(&mut cols[1], |ui| {
-                    ui.label(RichText::new(title).size(17.0).strong().color(ACCENT));
-                    if let Some(series) = book.get("series").and_then(Value::as_str) {
-                        let idx = book
-                            .get("series_index")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(1.0);
-                        ui.label(RichText::new(format!("Series: {series} #{idx}")).color(AMBER));
-                    }
-                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Speak Synopsis (speech-mcp)").clicked() {
-                            let text = format!("{title}. {synopsis}");
-                            self.spawn(move || async move {
-                                let res = dispatch(Command::BridgeSpeak {
-                                    text,
-                                    voice: None,
-                                    url: None,
-                                })
-                                .await;
-                                Job::StatusNote("Sent synopsis to speech-mcp".to_string(), res)
-                            });
-                        }
-                        if ui.button("Ask Gemma 4 About Book").clicked() {
-                            self.chat_prompt = format!(
-                                "Tell me about the book '{title}' and its main themes: {synopsis}"
+                        if let Some(tex) = &self.cover_tex {
+                            let sz = tex.size_vec2();
+                            let scale = (115.0 / sz.y.max(1.0)).min(1.0);
+                            ui.add(
+                                egui::Image::new(tex)
+                                    .fit_to_exact_size(egui::vec2(sz.x * scale, sz.y * scale))
+                                    .corner_radius(egui::CornerRadius::same(6)),
                             );
-                            self.page = Page::Chat;
                         }
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(title).size(17.0).strong().color(ACCENT));
+                            if let Some(series) = book.get("series").and_then(Value::as_str) {
+                                let idx = book
+                                    .get("series_index")
+                                    .and_then(Value::as_f64)
+                                    .unwrap_or(1.0);
+                                ui.label(
+                                    RichText::new(format!("Series: {series} #{idx}")).color(AMBER),
+                                );
+                            }
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Read Excerpt").clicked() {
+                                    self.spawn_book_excerpt(book_id, 0);
+                                }
+                                if ui.button("Speak Synopsis (speech-mcp)").clicked() {
+                                    let text = format!("{title}. {synopsis}");
+                                    self.spawn(move || async move {
+                                        let res = dispatch(Command::BridgeSpeak {
+                                            text,
+                                            voice: None,
+                                            url: None,
+                                        })
+                                        .await;
+                                        Job::StatusNote(
+                                            "Sent synopsis to speech-mcp".to_string(),
+                                            res,
+                                        )
+                                    });
+                                }
+                                if ui.button("Ask Gemma 4").clicked() {
+                                    self.chat_prompt = format!(
+                                        "Tell me about the book '{title}' and its main themes: {synopsis}"
+                                    );
+                                    self.page = Page::Chat;
+                                }
+                            });
+                        });
                     });
                     ui.separator();
                     ui.label(RichText::new("Synopsis / Comments:").strong());
                     egui::ScrollArea::vertical()
                         .id_salt("book_synopsis_scroll")
-                        .max_height(260.0)
+                        .max_height(180.0)
                         .show(ui, |ui| {
                             ui.label(synopsis);
                         });
+                    if let Some(ex) = self
+                        .excerpt_val
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                    {
+                        let ex_src = self
+                            .excerpt_val
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .unwrap_or("books_text")
+                            .to_string();
+                        let total_c = self
+                            .excerpt_val
+                            .get("total_chars")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("Book Excerpt ({ex_src} · {total_c} chars)"))
+                                    .strong()
+                                    .color(EMERALD),
+                            );
+                            if self.excerpt_offset >= 2400 && ui.button("<< Prev Page").clicked() {
+                                self.spawn_book_excerpt(
+                                    book_id,
+                                    self.excerpt_offset.saturating_sub(2400),
+                                );
+                            }
+                            if ui.button("Next Page >>").clicked() {
+                                self.spawn_book_excerpt(book_id, self.excerpt_offset + 2400);
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("book_excerpt_scroll")
+                            .max_height(190.0)
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(&ex).font(FontId::monospace(12.0)));
+                            });
+                    }
                     if let Some(files) = detail.get("files").and_then(Value::as_array) {
                         ui.separator();
                         ui.label(RichText::new("Format Files on Disk:").strong());
@@ -763,16 +948,19 @@ impl CalibreApp {
                             let path = f.get("path").and_then(Value::as_str).unwrap_or("");
                             let sz = f.get("size_bytes").and_then(Value::as_i64).unwrap_or(0);
                             ui.label(
-                                RichText::new(format!("{fmt} ({:.2} MB) · {path}", (sz as f64) / 1_048_576.0))
-                                    .size(11.5)
-                                    .weak(),
+                                RichText::new(format!(
+                                    "{fmt} ({:.2} MB) · {path}",
+                                    (sz as f64) / 1_048_576.0
+                                ))
+                                .size(11.5)
+                                .weak(),
                             );
                         }
                     }
                 });
             } else {
                 card_frame(&mut cols[1], |ui| {
-                    ui.label("Click 'Inspect' on any book on the left to view full metadata, identifiers, files on disk, and synopsis.");
+                    ui.label("Click 'Inspect' on any book on the left to view cover art, full metadata, identifiers, files on disk, synopsis, and full-text excerpt.");
                 });
             }
         });
@@ -830,7 +1018,7 @@ impl CalibreApp {
 
     fn view_analytics(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Library Health & Canon Coverage");
+            ui.heading("Library Health, Reading Statistics & Unread Priority");
             if ui.button("Run Audit").clicked() {
                 self.spawn_analytics();
             }
@@ -871,37 +1059,107 @@ impl CalibreApp {
         });
         ui.add_space(10.0);
 
-        if let Some(series_arr) = self.series_val.get("series").and_then(Value::as_array) {
+        let decades_bars: Vec<(String, f64)> = self
+            .reading_stats_val
+            .get("decades")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .take(10)
+                    .map(|d| {
+                        (
+                            d.get("decade")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Unknown")
+                                .to_string(),
+                            d.get("book_count").and_then(Value::as_i64).unwrap_or(0) as f64,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !decades_bars.is_empty() {
             card_frame(ui, |ui| {
-                ui.label(RichText::new("Series & Canon Coverage (Gap Detector)").strong());
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
-                    .show(ui, |ui| {
-                        for s in series_arr {
-                            let name = s.get("name").and_then(Value::as_str).unwrap_or("Series");
-                            let cnt = s.get("book_count").and_then(Value::as_i64).unwrap_or(0);
-                            let missing = s
-                                .get("missing_indices")
-                                .and_then(Value::as_array)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(name).strong());
-                                ui.label(format!("· {cnt} volumes"));
-                                if missing == 0 {
-                                    ui.label(RichText::new("· Complete").color(EMERALD));
-                                } else {
-                                    ui.label(
-                                        RichText::new(format!("· {missing} missing volume(s)"))
-                                            .color(AMBER),
-                                    );
-                                }
-                            });
-                        }
-                    });
+                bar_chart(ui, "Books by Publication Decade", &decades_bars, ACCENT);
             });
+            ui.add_space(8.0);
         }
+
+        ui.columns(2, |cols| {
+            if let Some(series_arr) = self.series_val.get("series").and_then(Value::as_array) {
+                card_frame(&mut cols[0], |ui| {
+                    ui.label(RichText::new("Series & Canon Coverage (Gap Detector)").strong());
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("series_gap_scroll")
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            for s in series_arr {
+                                let name =
+                                    s.get("name").and_then(Value::as_str).unwrap_or("Series");
+                                let cnt = s.get("book_count").and_then(Value::as_i64).unwrap_or(0);
+                                let missing = s
+                                    .get("missing_indices")
+                                    .and_then(Value::as_array)
+                                    .map(|m| m.len())
+                                    .unwrap_or(0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(name).strong());
+                                    ui.label(format!("· {cnt} volumes"));
+                                    if missing == 0 {
+                                        ui.label(RichText::new("· Complete").color(EMERALD));
+                                    } else {
+                                        ui.label(
+                                            RichText::new(format!("· {missing} missing volume(s)"))
+                                                .color(AMBER),
+                                        );
+                                    }
+                                });
+                            }
+                        });
+                });
+            }
+
+            if let Some(prio_arr) = self
+                .priority_val
+                .get("priority_queue")
+                .and_then(Value::as_array)
+                .cloned()
+            {
+                card_frame(&mut cols[1], |ui| {
+                    ui.label(RichText::new("Unread Priority Queue (Top Ranked)").strong());
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("unread_priority_scroll")
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            for p in prio_arr {
+                                let bid = p.get("id").and_then(Value::as_i64).unwrap_or(0);
+                                let title =
+                                    p.get("title").and_then(Value::as_str).unwrap_or("Book");
+                                let score =
+                                    p.get("priority_score").and_then(Value::as_i64).unwrap_or(0);
+                                let reason = p.get("reason").and_then(Value::as_str).unwrap_or("");
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("[{score} pts]"))
+                                            .color(EMERALD)
+                                            .strong(),
+                                    );
+                                    ui.label(RichText::new(title).strong());
+                                    if ui.button("Inspect").clicked() {
+                                        self.spawn_book_detail(bid);
+                                        self.page = Page::Books;
+                                    }
+                                });
+                                ui.label(RichText::new(reason).size(11.0).weak());
+                                ui.add_space(3.0);
+                            }
+                        });
+                });
+            }
+        });
     }
 
     fn view_crossconnect(&mut self, ui: &mut egui::Ui) {
@@ -1081,7 +1339,7 @@ impl CalibreApp {
 impl eframe::App for CalibreApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.drain_jobs();
+        self.drain_jobs(&ctx);
         if self.pending > 0 {
             ctx.request_repaint();
         }

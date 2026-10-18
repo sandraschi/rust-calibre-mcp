@@ -48,10 +48,13 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title("Calibre (Rust) v0.4")
         .with_inner_size([1320.0, 860.0])
         .with_min_inner_size([920.0, 600.0]);
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -61,4 +64,16 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |ctx| Ok(Box::new(app::CalibreApp::new(ctx, runtime)))),
     )
+}
+
+fn load_icon() -> Option<egui::IconData> {
+    let bytes = include_bytes!("../icons/icon.png");
+    let image = image::load_from_memory(bytes).ok()?;
+    let rgba = image.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    Some(egui::IconData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
 }
