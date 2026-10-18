@@ -1,16 +1,21 @@
 # HANDOVER -- `rust-calibre-mcp`
 
-**Last Updated:** 2026-10-18T01:06:00+02:00  
-**Current Phase:** Phase 0 Complete (`docs/CONVERSION_DOSSIER.md` committed) -> Ready for Phase 1/2 (`crates/calibre-core`)
+**Last Updated:** 2026-10-18T02:05:00+02:00
+**Current Phase:** Phase 5 COMPLETE (All compiler, test, headless GUI, MCP stdio, and live 11-library SQLite oracle gates passed)
 
 ## What Was Done
-- Ran `mcp-central-docs/scripts/New-RustArtcraftRepo.ps1 -Domain calibre`.
-- Completed the 7-point Belt-and-Suspenders `docs/CONVERSION_DOSSIER.md`:
-  - Confirmed `D:\Dev\repos\calibre-mcp` is at `master@5abaad6` (100% untouched).
-  - Verified 11 live Calibre libraries on `L:\Multimedia Files\Written Word\` (`Calibre-Bibliothek` 34.36 MB `metadata.db` + `full-text-search.db`).
-  - Mapped all 29 `calibre-mcp` tools (including portmanteau `manage_libraries`, `query_books`, `manage_books`, `search_fulltext`, `bookcase_catalog`, `manage_authors`, `manage_tags`, `get_series_analysis`, `find_duplicate_books`, `analyze_library_health`, etc.) to `Command` variants with dual tool-name aliasing.
-  - Copied `bridge.rs`, `llm.rs` (`gemma4:12b`), `error.rs`, `creds.rs`, `vault.rs`, and `registry.rs` from `rust-devices-mcp`.
+- Executed the first end-to-end Wave-0 `repconv` conversion pilot from `D:\Dev\repos\calibre-mcp` (`master@5abaad6`, untouched read-only) into `D:\Dev\repos\rust-calibre-mcp`.
+- Built and verified all 3 crates (`calibre-core`, `rust-calibre-mcp`, `calibre-app`):
+  - `cargo fmt --all --check` -> PASS
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings` -> PASS (0 warnings)
+  - `cargo test --workspace` -> PASS (27/27 tests)
+  - `cargo run -q -p calibre-app -- --smoke` -> PASS
+  - Live read-only SQLite verification across all 11 Calibre libraries on `L:\Multimedia Files\Written Word\` (`Calibre-Bibliothek` with 10,339 books, `Calibre-Bibliothek IT` with full-text search on `full-text-search.db:books_text`, etc.) -> PASS
+  - MCP JSON-RPC 2.0 `mcp-stdio` round-trip for both canonical `calibre.*` tools and legacy portmanteau aliases (`manage_libraries`, `search_fulltext`) -> PASS
 
-## Next Concrete Action
-1. Write workspace `Cargo.toml`, `crates/calibre-core` (`import.rs` reading `../calibre-mcp/config.json` + `L:\Multimedia Files\Written Word\*`, and `calibre_db.rs` querying `metadata.db` + `full-text-search.db` via `rusqlite` `SQLITE_OPEN_READ_ONLY` + `Demo` fallback).
-2. Wire `crates/calibre-mcp` CLI + dual-aliased MCP stdio server and `crates/calibre-app` `egui` desktop UI (`Libraries`, `Books`, `Analytics` tabs).
+## What Was Deliberately Not Done
+- Did not modify a single file in `D:\Dev\repos\calibre-mcp`.
+- Did not open any Calibre SQLite file in read-write mode; all connections enforce `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` + `5000 ms` `busy_timeout`.
+
+## Next Concrete Action (Optional Future Wave)
+- Use `rust-calibre-mcp` as the second reference blueprint alongside `rust-devices-mcp` when converting Wave-0 Pilot #2 (`plex-mcp` -> `rust-plex-mcp`).
