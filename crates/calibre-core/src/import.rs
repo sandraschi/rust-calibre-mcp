@@ -303,8 +303,7 @@ mod tests {
 
     #[test]
     fn dotenv_parser_handles_quotes_and_comments() {
-        let sample =
-            "# comment\nCALIBRE_LIBRARY_PATH=\"/books/MainLibrary\"\nCALIBRE_TIMEOUT=30\n";
+        let sample = "# comment\nCALIBRE_LIBRARY_PATH=\"/books/MainLibrary\"\nCALIBRE_TIMEOUT=30\n";
         let map = parse_dotenv(sample);
         assert_eq!(map.get("CALIBRE_TIMEOUT").map(String::as_str), Some("30"));
         assert!(map.contains_key("CALIBRE_LIBRARY_PATH"));

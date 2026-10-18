@@ -618,7 +618,7 @@ impl CalibreApp {
             .and_then(Value::as_i64)
             .unwrap_or(0);
         let active_label = if self.active_library.is_empty() {
-            "Calibre-Bibliothek"
+            "Default Library"
         } else {
             &self.active_library
         };
@@ -744,7 +744,7 @@ impl CalibreApp {
             {
                 self.spawn_query_books();
             }
-            if ui.button("Search All 11 Libraries").clicked() {
+            if ui.button("Search All Libraries").clicked() {
                 self.spawn_search_all_libraries();
             }
             if ui.button("Clear").clicked() {
