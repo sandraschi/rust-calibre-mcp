@@ -24,6 +24,34 @@ const EMERALD: Color32 = Color32::from_rgb(52, 211, 153);
 const AMBER: Color32 = Color32::from_rgb(251, 191, 36);
 const ROSE: Color32 = Color32::from_rgb(251, 113, 133);
 
+const LLM_PROVIDERS: &[(&str, &str, &str, &str)] = &[
+    (
+        "ollama",
+        "Ollama (Local :11434)",
+        "http://127.0.0.1:11434/v1",
+        "gemma4:12b",
+    ),
+    (
+        "lmstudio",
+        "LM Studio (Local :1234)",
+        "http://127.0.0.1:1234/v1",
+        "local-model",
+    ),
+    (
+        "openai",
+        "OpenAI (Cloud)",
+        "https://api.openai.com/v1",
+        "gpt-4o-mini",
+    ),
+    (
+        "anthropic",
+        "Anthropic (Cloud)",
+        "https://api.anthropic.com",
+        "claude-sonnet-4-20250514",
+    ),
+    ("custom", "Custom / OpenAI-Compatible", "", ""),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
     Dark,
@@ -63,6 +91,8 @@ enum Job {
         calibre_password: String,
         llm_api_key: String,
     },
+    LlmModelsLoaded(Value),
+    LlmTestResult(Value),
 }
 
 pub struct CalibreApp {
@@ -111,6 +141,9 @@ pub struct CalibreApp {
     calibre_password: String,
     llm_api_key: String,
     llm_base_url: String,
+    available_models: Vec<String>,
+    llm_test_status: String,
+    llm_test_success: Option<bool>,
     custom_library_name: String,
     custom_library_path: String,
     pinned_registry: crate::registry::Registry,
@@ -297,7 +330,10 @@ impl CalibreApp {
             calibre_server_url: "http://127.0.0.1:8080".to_string(),
             calibre_password: String::new(),
             llm_api_key: String::new(),
-            llm_base_url: "http://127.0.0.1:11434".to_string(),
+            llm_base_url: "http://127.0.0.1:11434/v1".to_string(),
+            available_models: Vec::new(),
+            llm_test_status: String::new(),
+            llm_test_success: None,
             custom_library_name: String::new(),
             custom_library_path: String::new(),
             pinned_registry: crate::registry::load(),
@@ -614,6 +650,45 @@ impl CalibreApp {
                     self.vault_status_note =
                         "OS Keyring: connected to Windows Credential Manager ('rust-calibre-mcp')"
                             .to_string();
+                }
+                Job::LlmModelsLoaded(v) => {
+                    if let Some(arr) = v.get("models").and_then(Value::as_array) {
+                        let mut list = Vec::new();
+                        for m in arr {
+                            if let Some(s) = m.as_str() {
+                                list.push(s.to_string());
+                            }
+                        }
+                        if !list.is_empty() {
+                            self.llm_test_status =
+                                format!("Discovered {} models from provider", list.len());
+                            self.llm_test_success = Some(true);
+                            if self.chat_model.trim().is_empty() {
+                                if let Some(first) = list.first() {
+                                    self.chat_model = first.clone();
+                                }
+                            }
+                        } else {
+                            self.llm_test_status = "Provider returned 0 models".to_string();
+                            self.llm_test_success = Some(false);
+                        }
+                        self.available_models = list;
+                    } else if let Some(err) = v.get("error").and_then(Value::as_str) {
+                        self.llm_test_status = format!("Model fetch failed: {err}");
+                        self.llm_test_success = Some(false);
+                    }
+                    self.last_raw = v;
+                }
+                Job::LlmTestResult(v) => {
+                    if let Some(reply) = v.get("reply").and_then(Value::as_str) {
+                        let clean_reply = reply.trim().replace('\n', " ");
+                        self.llm_test_status = format!("Online · Reply: {clean_reply}");
+                        self.llm_test_success = Some(true);
+                    } else if let Some(err) = v.get("error").and_then(Value::as_str) {
+                        self.llm_test_status = format!("Inference test failed: {err}");
+                        self.llm_test_success = Some(false);
+                    }
+                    self.last_raw = v;
                 }
             }
         }
@@ -1240,9 +1315,21 @@ impl CalibreApp {
         card_frame(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Provider:");
-                ui.text_edit_singleline(&mut self.chat_provider);
+                ui.label(RichText::new(&self.chat_provider).strong());
                 ui.label("Model:");
                 ui.text_edit_singleline(&mut self.chat_model);
+                if !self.available_models.is_empty() {
+                    egui::ComboBox::from_id_salt("chat_model_picker")
+                        .selected_text(&self.chat_model)
+                        .show_ui(ui, |ui| {
+                            for m in &self.available_models {
+                                let is_sel = self.chat_model == *m;
+                                if ui.selectable_label(is_sel, m).clicked() {
+                                    self.chat_model = m.clone();
+                                }
+                            }
+                        });
+                }
             });
             ui.add_space(4.0);
             ui.label("Prompt:");
@@ -1421,26 +1508,154 @@ impl CalibreApp {
 
             ui.add_space(8.0);
 
-            // Card 2: Local AI & Ollama Copilot Configuration
+            // Card 2: LLM & AI Assistant Configuration (Fleet Standard)
             card_frame(ui, |ui| {
-                ui.heading("Local AI Copilot (Ollama / Local LLM)");
-                ui.label("Configure your local offline neural librarian. Zero telemetry, 100% private.");
+                ui.heading("LLM & AI Assistant Configuration");
+                ui.label("Configure local neural engines (Ollama, LM Studio) or cloud providers (OpenAI, Anthropic) with model discovery and credential management.");
                 ui.add_space(6.0);
 
+                // 1. Provider Picker
                 ui.horizontal(|ui| {
                     ui.label("Provider:");
-                    ui.text_edit_singleline(&mut self.chat_provider);
-                    ui.label("Model:");
-                    ui.text_edit_singleline(&mut self.chat_model);
+                    let current_display = match self.chat_provider.as_str() {
+                        "ollama" => "Ollama (Local :11434)",
+                        "lmstudio" => "LM Studio (Local :1234)",
+                        "openai" => "OpenAI (Cloud)",
+                        "anthropic" => "Anthropic (Cloud)",
+                        "custom" => "Custom / OpenAI-Compatible",
+                        _ => &self.chat_provider,
+                    };
+                    egui::ComboBox::from_id_salt("llm_provider_combo")
+                        .selected_text(current_display)
+                        .show_ui(ui, |ui| {
+                            for (key, label, default_base, default_mod) in LLM_PROVIDERS {
+                                let is_sel = self.chat_provider == *key;
+                                if ui.selectable_label(is_sel, *label).clicked() {
+                                    self.chat_provider = key.to_string();
+                                    self.llm_base_url = default_base.to_string();
+                                    if !default_mod.is_empty() {
+                                        self.chat_model = default_mod.to_string();
+                                    }
+                                    self.available_models.clear();
+                                    self.llm_test_status.clear();
+                                    self.llm_test_success = None;
+                                }
+                            }
+                        });
                 });
+
+                ui.add_space(4.0);
+
+                // 2. Base URL / Endpoint
                 ui.horizontal(|ui| {
-                    ui.label("Ollama Endpoint:");
-                    ui.text_edit_singleline(&mut self.llm_base_url);
+                    ui.label("Endpoint Base URL:");
+                    ui.add_sized([320.0, 20.0], egui::TextEdit::singleline(&mut self.llm_base_url));
+                });
+
+                ui.add_space(4.0);
+
+                // 3. API Key Entry
+                let is_cloud = matches!(self.chat_provider.as_str(), "openai" | "anthropic" | "custom");
+                ui.horizontal(|ui| {
+                    ui.label("API Key:");
+                    ui.add_sized(
+                        [260.0, 20.0],
+                        egui::TextEdit::singleline(&mut self.llm_api_key).password(true),
+                    );
+                    if ui.button("Save Key to Vault").clicked() {
+                        let key = self.llm_api_key.clone();
+                        self.spawn(move || async move {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let _ = crate::vault::set("llm_api_key", &key);
+                            })
+                            .await;
+                            Job::StatusNote(
+                                "Saved LLM API key to Windows Credential Manager".to_string(),
+                                json!({"saved_key": true}),
+                            )
+                        });
+                    }
+                    if ui.button("Clear Key").clicked() {
+                        self.llm_api_key.clear();
+                        self.spawn(|| async move {
+                            let _ = tokio::task::spawn_blocking(|| {
+                                let _ = crate::vault::delete("llm_api_key");
+                            })
+                            .await;
+                            Job::StatusNote(
+                                "Cleared LLM API key from Windows Credential Manager".to_string(),
+                                json!({"cleared_key": true}),
+                            )
+                        });
+                    }
+                });
+                if is_cloud {
+                    ui.label(RichText::new("Cloud provider active: API key is stored securely in Windows Credential Manager.").weak().size(11.0));
+                } else {
+                    ui.label(RichText::new("Local provider active: API key is optional for local Ollama and LM Studio.").weak().size(11.0));
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+
+                // 4. Elicit List of Available Models & Let User Select
+                ui.label(RichText::new("Model Selection & Discovery").strong());
+                ui.horizontal(|ui| {
+                    if ui.button("Fetch Available Models").clicked() {
+                        let provider = self.chat_provider.clone();
+                        let base_url = if self.llm_base_url.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.llm_base_url.trim().to_string())
+                        };
+                        let api_key = if self.llm_api_key.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.llm_api_key.trim().to_string())
+                        };
+                        self.llm_test_status = "Querying available models from endpoint…".to_string();
+                        self.llm_test_success = None;
+                        self.spawn(move || async move {
+                            let res = dispatch(Command::LlmModels {
+                                provider,
+                                base_url,
+                                api_key,
+                            })
+                            .await;
+                            Job::LlmModelsLoaded(res)
+                        });
+                    }
+
+                    if !self.available_models.is_empty() {
+                        ui.label("Select Discovered:");
+                        egui::ComboBox::from_id_salt("llm_model_picker")
+                            .selected_text(&self.chat_model)
+                            .show_ui(ui, |ui| {
+                                for m in &self.available_models {
+                                    let is_sel = self.chat_model == *m;
+                                    if ui.selectable_label(is_sel, m).clicked() {
+                                        self.chat_model = m.clone();
+                                    }
+                                }
+                            });
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Active Model ID:");
+                    ui.add_sized([260.0, 20.0], egui::TextEdit::singleline(&mut self.chat_model));
+                    if !self.available_models.is_empty() {
+                        ui.label(RichText::new(format!("({} discovered)", self.available_models.len())).size(11.0).weak());
+                    }
                 });
 
                 ui.add_space(6.0);
+                ui.separator();
+
+                // 5. Test Inference Button & Live Status Pill
+                ui.label(RichText::new("Connection & Inference Test").strong());
                 ui.horizontal(|ui| {
-                    if ui.button("Test Ollama Connection").clicked() {
+                    if ui.button("Test LLM Connection").clicked() {
                         let provider = self.chat_provider.clone();
                         let model = Some(self.chat_model.clone());
                         let base_url = if self.llm_base_url.trim().is_empty() {
@@ -1453,7 +1668,8 @@ impl CalibreApp {
                         } else {
                             Some(self.llm_api_key.trim().to_string())
                         };
-                        self.status_line = "Testing LLM connection…".to_string();
+                        self.llm_test_status = "Sending test ping to LLM endpoint…".to_string();
+                        self.llm_test_success = None;
                         self.spawn(move || async move {
                             let res = dispatch(Command::LlmChat {
                                 provider,
@@ -1465,41 +1681,26 @@ impl CalibreApp {
                                 api_key,
                             })
                             .await;
-                            Job::StatusNote("Ollama test completed".to_string(), res)
+                            Job::LlmTestResult(res)
                         });
                     }
-                    if ui.button("Query Available Models").clicked() {
-                        let provider = self.chat_provider.clone();
-                        let base_url = if self.llm_base_url.trim().is_empty() {
-                            None
-                        } else {
-                            Some(self.llm_base_url.trim().to_string())
-                        };
-                        let api_key = if self.llm_api_key.trim().is_empty() {
-                            None
-                        } else {
-                            Some(self.llm_api_key.trim().to_string())
-                        };
-                        self.status_line = "Querying available models…".to_string();
-                        self.spawn(move || async move {
-                            let res = dispatch(Command::LlmModels {
-                                provider,
-                                base_url,
-                                api_key,
-                            })
-                            .await;
-                            Job::StatusNote("Models catalog fetched".to_string(), res)
-                        });
+
+                    if let Some(ok) = self.llm_test_success {
+                        status_pill(ui, ok, if ok { "ONLINE" } else { "ERROR" });
                     }
                 });
+
+                if !self.llm_test_status.is_empty() {
+                    ui.label(RichText::new(&self.llm_test_status).size(12.0));
+                }
             });
 
             ui.add_space(8.0);
 
-            // Card 3: Windows Credential Manager Vault
+            // Card 3: Windows Credential Manager Vault (Calibre Server)
             card_frame(ui, |ui| {
-                ui.heading("Windows Credential Manager Vault");
-                ui.label("Credentials are stored in OS Credential Manager under 'rust-calibre-mcp'. Secrets never touch disk in plain text.");
+                ui.heading("Windows Credential Manager Vault (Calibre Server)");
+                ui.label("Calibre Content Server credentials are stored in OS Credential Manager under 'rust-calibre-mcp'. Secrets never touch disk in plain text.");
                 ui.add_space(6.0);
 
                 ui.label("Calibre Content Server URL (Optional):");
@@ -1508,23 +1709,16 @@ impl CalibreApp {
                 ui.label("Calibre Content Server Password:");
                 ui.add(egui::TextEdit::singleline(&mut self.calibre_password).password(true));
 
-                ui.label("Cloud LLM API Key (Optional, for remote providers):");
-                ui.add(egui::TextEdit::singleline(&mut self.llm_api_key).password(true));
-
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save to Windows Credential Manager").clicked() {
                         let url = self.calibre_server_url.clone();
                         let pw = self.calibre_password.clone();
-                        let key = self.llm_api_key.clone();
                         self.spawn(move || async move {
                             let _ = tokio::task::spawn_blocking(move || {
                                 let _ = crate::vault::set("calibre_server_url", &url);
                                 if !pw.is_empty() {
                                     let _ = crate::vault::set("calibre_password", &pw);
-                                }
-                                if !key.is_empty() {
-                                    let _ = crate::vault::set("llm_api_key", &key);
                                 }
                             })
                             .await;
@@ -1535,18 +1729,16 @@ impl CalibreApp {
                         });
                     }
 
-                    if ui.button("Clear Vault Credentials").clicked() {
+                    if ui.button("Clear Calibre Credentials").clicked() {
                         self.calibre_password.clear();
-                        self.llm_api_key.clear();
                         self.spawn(|| async move {
                             let _ = tokio::task::spawn_blocking(|| {
                                 let _ = crate::vault::delete("calibre_server_url");
                                 let _ = crate::vault::delete("calibre_password");
-                                let _ = crate::vault::delete("llm_api_key");
                             })
                             .await;
                             Job::StatusNote(
-                                "Cleared credentials from Windows Credential Manager".to_string(),
+                                "Cleared Calibre credentials from Windows Credential Manager".to_string(),
                                 json!({"cleared": true}),
                             )
                         });
