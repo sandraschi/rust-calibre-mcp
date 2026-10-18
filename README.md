@@ -1,63 +1,73 @@
 # rust-calibre-mcp
 
-Native Rust Artcraft conversion of [`calibre-mcp`](../calibre-mcp) — a single-workspace 3-crate Calibre library engine (`calibre-core`), CLI + MCP 2024-11-05 server (`rust-calibre-mcp`), and `eframe`/`egui 0.37` native desktop application (`calibre-app`).
+Pure-Rust Calibre e-book manager interface, 23-tool Model Context Protocol (MCP) server, and native GPU-rendered desktop dashboard.
 
-## Why `rust-calibre-mcp`?
+## What this wraps
 
-- **Zero-Corruption Read-Only SQLite Guarantee**: Every read connection to Calibre's `metadata.db` and `full-text-search.db` uses `OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX` + `busy_timeout(5000 ms)`, safe to run concurrently while the Calibre desktop GUI is open on the same library. Metadata updates (`calibre.book_update`) are guarded by an explicit write-safety fence (`confirm_write = false` returns a read-only dry-run preview).
-- **Custom Tokenizer Bypass on `full-text-search.db`**: Queries `full-text-search.db:books_text` directly with snippet extraction (`substr` + `instr`) and paginated character-safe excerpt reading (`calibre.book_excerpt`), avoiding Calibre's proprietary `calibre remove_diacritics` FTS5 C tokenizer so standalone `rusqlite` works with zero external C plugins.
-- **23 Canonical Commands + Dual Tool-Dispatcher Aliasing**: Exposes 23 canonical `calibre.*` / `bridge.*` / `llm.*` MCP tools **and** routes legacy FastMCP portmanteau tool names (`manage_libraries`, `query_books`, `search_fulltext`, `bookcase_catalog`, `manage_books`, `inspect_contents`, `manage_viewer`, `manage_authors`, `manage_tags`, `get_series_analysis`, `canon_coverage`, `analyze_library_health`, `find_duplicate_books`, `reading_statistics`, `unread_priority_list`, `cross_library_search_helper`, `manage_comments`, `manage_metadata`, `export_books`, `calibre_metadata_export_json`) to `calibre_core::dispatch()`.
-- **Zero-Config Multi-Library Discovery**: Automatically discovers all local Calibre libraries from `--library`, `CALIBRE_LIBRARY_PATH`, `%APPDATA%\calibre\gui.json`, `global.py.json`, and sibling directories, plus a deterministic 6-book `Demo-Library` fallback for offline/CI tests.
-- **Local LLM Book Copilot**: Built-in `llm.rs` client defaults to `gemma4:12b` on Ollama.
+This project interfaces with **[Calibre](https://calibre-ebook.com/)**, the popular open-source e-book manager. It connects directly to local Calibre libraries on disk via fast, read-only SQLite queries. See [docs/WRAPPEE.md](docs/WRAPPEE.md) for Calibre project links and community resources.
 
-## Workspace Layout (L1 / L2 / L3)
+## What You Can Do
 
-| Layer | Crate | Role |
-|---|---|---|
-| **L1 Core** | [`crates/calibre-core`](crates/calibre-core/README.md) | Pure library (`calibre_db`, `import`, `llm`, `bridge`, `creds`, `error`). Zero stdout/stderr, typed `Command` + `dispatch()` across 23 canonical commands. |
-| **L2 CLI + MCP** | [`crates/calibre-mcp`](crates/calibre-mcp/README.md) | `rust-calibre-mcp` binary: `clap 4.6` subcommands + `mcp-stdio` JSON-RPC 2.0 server (`2024-11-05`). |
-| **L3 GUI** | [`crates/calibre-app`](crates/calibre-app/README.md) | `calibre-app` binary: `eframe`/`egui 0.37` native desktop app (9 pages, live `cover.jpg` texture rendering, paginated book excerpt reader, federated multi-library search, reading stats & unread priority queue) + `--smoke` headless probe. |
+- **Search & Filter**: Search book titles, authors, genres/tags, series, and formats across multiple libraries simultaneously.
+- **Deep Full-Text Search**: Search directly inside book bodies via Calibre's full-text index without external dependencies.
+- **Book Inspector**: View cover art, metadata, formats on disk, and paginated text excerpts directly inside the native desktop app.
+- **Reading Queue & Analytics**: View unread books ranked by ratings and series order, publication decade charts, and series completion gap analysis.
+- **AI Librarian Copilot**: Ask questions about your collection with automatic book synopsis and context injection (local Ollama or cloud models).
+- **Fleet Crossconnect**: Speak book synopses aloud via `speech-mcp` or push events to `aiwatcher`.
+- **Zero-Corruption Read-Only Engine**: All SQLite queries run in strict read-only mode, safe to use even while the Calibre desktop app is open.
 
-## Quick Start
+## Install
 
-```powershell
-# List all discovered Calibre libraries (plus Demo fallback)
-cargo run -q -p rust-calibre-mcp -- libraries
+### 1. Windows Installer (Recommended)
+1. Download **`Calibre-Rust-0.4.0-setup.exe`** from the [latest release](https://github.com/sandraschi/rust-calibre-mcp/releases/latest).
+2. Run the installer. Windows may show a SmartScreen warning for unsigned binaries: choose **More info > Run anyway**.
+3. Open **Calibre (Rust)** from your Start menu.
 
-# Library statistics for the active/default Calibre library
-cargo run -q -p rust-calibre-mcp -- library-stats
+### 2. For Claude Desktop / Cursor / OpenCode (MCP Server Only)
+Add `rust-calibre-mcp` to your MCP client configuration (`claude_desktop_config.json`):
 
-# Multi-filter book search
-cargo run -q -p rust-calibre-mcp -- query-books --query "Rust" --limit 10
-
-# Federated search across all discovered Calibre libraries
-cargo run -q -p rust-calibre-mcp -- search-all --query "Python" --limit-per-library 3
-
-# Read a book excerpt from full-text-search.db:books_text
-cargo run -q -p rust-calibre-mcp -- book-excerpt --book-id 1 --max-chars 500
-
-# Reading statistics (languages, publishers, decades, ratings) & Unread Priority Queue
-cargo run -q -p rust-calibre-mcp -- reading-stats
-cargo run -q -p rust-calibre-mcp -- unread-priority --limit 5
-
-# Library health audit (missing formats, covers, ISBNs, comments, series gaps)
-cargo run -q -p rust-calibre-mcp -- library-health
-
-# Headless GUI smoke test
-cargo run -q -p calibre-app -- --smoke
+```json
+{
+  "mcpServers": {
+    "calibre": {
+      "command": "C:\\path\\to\\rust-calibre-mcp.exe",
+      "args": ["mcp-stdio"]
+    }
+  }
+}
 ```
+
+For full installation options across Windows, macOS, and Linux, see [INSTALL.md](INSTALL.md).  
+Developers: build instructions and test recipes are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+## Example Prompts
+
+Once configured in Claude or your AI agent, you can ask natural-language questions:
+
+- *"What science fiction books in my Calibre collection have a 5-star rating?"*
+- *"Find any books mentioning 'quantum computing' in the full-text search index and show me excerpts."*
+- *"Are there any missing books in my Frank Herbert Dune series?"*
+- *"Give me a summary of my unread priority reading list."*
 
 ## Documentation
 
-- [`INSTALL.md`](INSTALL.md) — Build, install, and MCP client registration
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.4.0`)
-- [`docs/UI_PARITY.md`](docs/UI_PARITY.md) — `egui 0.37` ArtCraft desktop UI specification
-- [`docs/CONVERSION_DOSSIER.md`](docs/CONVERSION_DOSSIER.md) — Phase 0 due-diligence dossier
-- [`docs/ASSESSMENT_2026_10_18.md`](docs/ASSESSMENT_2026_10_18.md) — `repconv` rubric assessment
-- [`docs/CONVERSION_LOG.md`](docs/CONVERSION_LOG.md) — Phase-by-phase telemetry & oracle verification
+| Document | Description |
+|---|---|
+| [Installation Guide](INSTALL.md) | Full setup options (installer, portable exe, build from source) |
+| [Wrapped Application](docs/WRAPPEE.md) | Calibre project information, documentation, and community links |
+| [Architecture](docs/ARCHITECTURE.md) | 3-crate ArtCraft architecture, SQLite read-only safety, and FTS5 bypass |
+| [Configuration](docs/CONFIGURATION.md) | Environment variables, discovery priority, and settings |
+| [Tool Reference](docs/TOOLS.md) | Complete list of all 23 canonical MCP tools and legacy aliases |
+| [Development](docs/DEVELOPMENT.md) | Source build guide, justfile recipes, and testing gates |
+| [UI Parity Specification](docs/UI_PARITY.md) | `egui 0.37` desktop dashboard layout and visual standards |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common questions, SmartScreen help, and diagnostic steps |
 
-## Verification Gates
+## Requirements
 
-```powershell
-just check
-```
+- **Operating System**: Windows 10/11, macOS 13+, or Linux x64
+- **Calibre**: Calibre 5.0+ installed locally with at least one library (or run in Demo mode)
+- **Claude / Cursor**: Any MCP-compatible AI client
+
+## License
+
+Dual-licensed under MIT OR Apache-2.0.
