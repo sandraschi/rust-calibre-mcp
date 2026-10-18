@@ -83,3 +83,22 @@ pub enum Command {
 ```
 
 Every command is tested for `Send` safety at compile time via `dispatch_future_is_send`.
+
+---
+
+## 5. L3 Native Desktop GUI Architecture (`calibre-app`)
+
+The desktop app in `crates/calibre-app` operates as an immediate-mode GPU application with an asynchronous background Tokio worker:
+
+1. **16-Page Navigation Router (`Page`)**:
+   - `CONTENT`: `Page::Libraries`, `Page::Books`, `Page::Authors`, `Page::Series`, `Page::Tags`, `Page::Publishers`.
+   - `DISCOVER`: `Page::Fulltext`, `Page::Reading`, `Page::Duplicates`.
+   - `MANAGE`: `Page::Health`.
+   - `AI & FLEET`: `Page::Chat`, `Page::Crossconnect`.
+   - `SYSTEM`: `Page::Logs`, `Page::Settings`, `Page::Help`, `Page::RawJson`.
+2. **Zero-UI-Thread-Blocking Worker Channel (`mpsc::Sender<Job>`)**:
+   - All SQLite queries, HTTP crossconnect requests, LLM model elicitation, and Windows Credential Manager operations are dispatched via `self.spawn(...)` to the Tokio runtime thread.
+   - Completed results are returned as `Job` variants (`Job::Books`, `Job::Authors`, `Job::Series`, `Job::Tags`, `Job::Duplicates`, `Job::Health`, `Job::ReadingStats`, `Job::VaultLoaded`, `Job::LlmModelsLoaded`, etc.) and drained cleanly on every render frame via `self.drain_jobs(&ctx)`.
+3. **OS Credential Manager Security (`keyring`)**:
+   - Calibre Content Server passwords and Cloud LLM API keys are stored strictly in the Windows Credential Manager under the target `rust-calibre-mcp`.
+   - Plain text secrets are never persisted to disk or serialized in config files.
