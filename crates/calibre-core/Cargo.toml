@@ -1,0 +1,19 @@
+[package]
+name = "calibre-core"
+version = "0.4.0"
+edition = "2021"
+description = "L1 domain core for rust-calibre-mcp: SQLite metadata.db & FTS5 queries, zero-config import, fleet bridge, and LLM client"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true }
+serde_yaml = { workspace = true }
+
+[lints]
+workspace = true
